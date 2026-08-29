@@ -1,0 +1,14 @@
+[package]
+name = "vtx-ui"
+description = "Reusable UI widgets for VTX"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+egui.workspace = true
+vtx-core.workspace = true
+
+[lints]
+workspace = true

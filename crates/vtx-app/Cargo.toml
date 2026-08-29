@@ -1,0 +1,20 @@
+[package]
+name = "vtx-app"
+description = "VTX main GUI application"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "vtx"
+path = "src/main.rs"
+
+[dependencies]
+eframe.workspace = true
+egui.workspace = true
+vtx-core.workspace = true
+vtx-ui.workspace = true
+
+[lints]
+workspace = true

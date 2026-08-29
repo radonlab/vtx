@@ -1,0 +1,2 @@
+# Keep in sync with .editorconfig: 4-space indent for Rust, max line width 100
+max_width = 100

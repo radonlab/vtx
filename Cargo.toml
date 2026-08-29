@@ -1,0 +1,32 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+license = "Apache-2.0"
+
+# Single source of truth for dependency versions.
+# Member crates opt in with `xxx.workspace = true`.
+[workspace.dependencies]
+eframe = { version = "0.36", default-features = false, features = [
+  "default_fonts",
+  "glow",
+  "wayland",
+  "x11",
+] }
+egui = "0.36"
+
+# Internal crates
+vtx-core = { path = "crates/vtx-core" }
+vtx-ui = { path = "crates/vtx-ui" }
+
+# Workspace-wide lint policy, inherited by member crates via `[lints] workspace = true`
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
