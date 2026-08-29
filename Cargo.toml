@@ -19,6 +19,9 @@ eframe = { version = "0.36", default-features = false, features = [
 ] }
 egui = "0.36"
 
+portable-pty = "0.9"
+vte = "0.15"
+
 # Internal crates
 vtx-core = { path = "crates/vtx-core" }
 vtx-ui = { path = "crates/vtx-ui" }
