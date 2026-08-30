@@ -1,6 +1,6 @@
 [package]
 name = "vtx-app"
-description = "VTX main GUI application"
+description = "VTX main application"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

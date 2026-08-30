@@ -1,6 +1,6 @@
 [package]
 name = "vtx-core"
-description = "VTX core models (GUI-agnostic)"
+description = "VTX core models"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
