@@ -20,6 +20,7 @@ eframe = { version = "0.36", default-features = false, features = [
 ] }
 egui = "0.36"
 portable-pty = "0.9"
+unicode-width = "0.2"
 vte = "0.15"
 
 [workspace.lints.rust]

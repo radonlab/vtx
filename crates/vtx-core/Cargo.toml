@@ -1,6 +1,6 @@
 [package]
 name = "vtx-core"
-description = "VTX core models"
+description = "VTX core modules"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,6 +8,7 @@ license.workspace = true
 
 [dependencies]
 portable-pty.workspace = true
+unicode-width.workspace = true
 vte.workspace = true
 
 [lints]

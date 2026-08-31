@@ -5,7 +5,7 @@
 ```
 vtx/
 ├── crates/
-│   ├── vtx-core/   # Core models
+│   ├── vtx-core/   # Core modules
 │   ├── vtx-ui/     # Reusable UI widgets
 │   └── vtx-app/    # Desktop application binary
 └── Cargo.toml      # Workspace root: shared dependencies and lints
@@ -13,7 +13,7 @@ vtx/
 
 | Crate      | Kind | Description                   |
 | ---------- | ---- | ------------------------------|
-| `vtx-core` | lib  | Core models                   |
+| `vtx-core` | lib  | Core modules                  |
 | `vtx-ui`   | lib  | Reusable UI widgets           |
 | `vtx-app`  | bin  | Main desktop application      |
 
