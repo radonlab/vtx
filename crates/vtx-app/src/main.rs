@@ -2,21 +2,25 @@
 
 use eframe::egui;
 use vtx_core::AppConfig;
-use vtx_ui::GridCanvas;
+use vtx_ui::TerminalTab;
 
 /// Application state.
-struct VtxApp {}
+struct VtxApp {
+    /// Multi-tab terminal container.
+    tabs: TerminalTab,
+}
 
 impl VtxApp {
     fn new(_cc: &eframe::CreationContext<'_>) -> Self {
-        Self {}
+        Self {
+            tabs: TerminalTab::new(),
+        }
     }
 }
 
 impl eframe::App for VtxApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        let size = ui.available_size();
-        ui.add(GridCanvas::new(size));
+        self.tabs.show(ui);
     }
 }
 
