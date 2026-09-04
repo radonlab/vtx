@@ -1,25 +1,67 @@
-//! Multi-tab container hosting one [`TerminalView`] per session.
+//! Dockable container hosting one [`TerminalView`] per session.
 
-use egui::{Align2, Color32, FontId, Response, Sense, Ui, Widget};
+use egui::{Align, Color32, Id, Layout, Response, Sense, Ui, UiBuilder, WidgetText};
+use egui_dock::{DockArea, DockState, NodePath, Style, TabViewer};
 
 use super::TerminalView;
 
-/// One open terminal session.
-struct Tab {
-    /// Label shown in the tab bar.
-    title: String,
+/// One dockable terminal session shown as a tab in the dock area.
+struct Pane {
+    /// Unique number used for the tab id and title.
+    id: usize,
+    /// Terminal screen rendered inside the tab.
+    view: TerminalView,
 }
 
-/// A tab bar plus a content area showing the selected [`TerminalView`].
+impl Pane {
+    /// Draws the terminal screen.
+    fn show(&mut self, ui: &mut Ui) -> Response {
+        self.view.show(ui)
+    }
+}
+
+/// Adapts terminal [`Pane`]s to the egui_dock tab interface.
+struct TerminalTabViewer {
+    /// Leaf whose `+` button was pressed, to be handled once the dock area
+    /// is done borrowing the [`DockState`].
+    pending_add: Option<NodePath>,
+}
+
+impl TabViewer for TerminalTabViewer {
+    type Tab = Pane;
+
+    fn id(&mut self, tab: &mut Self::Tab) -> Id {
+        Id::new(tab.id)
+    }
+
+    fn title(&mut self, tab: &mut Self::Tab) -> WidgetText {
+        format!("Shell {}", tab.id).into()
+    }
+
+    fn ui(&mut self, ui: &mut Ui, tab: &mut Self::Tab) {
+        tab.show(ui);
+    }
+
+    fn on_add(&mut self, path: NodePath) {
+        self.pending_add = Some(path);
+    }
+
+    fn scroll_bars(&self, _tab: &Self::Tab) -> [bool; 2] {
+        // The terminal scrolls its own buffer, so the dock area
+        // must not attach its own scroll bars.
+        [false, false]
+    }
+}
+
+/// A dock area with one [`TerminalView`] per tab.
 ///
-/// Tabs are appended with the `+` button at the end of the tab bar and
-/// closed with the `x` button on each tab.
+/// Tabs can be reordered, dragged between panes, split, and undocked into
+/// separate windows. New tabs are appended with the `+` button at the end of
+/// each tab bar and closed with the `x` button on each tab.
 pub struct TerminalTab {
-    /// Open tabs in display order.
-    tabs: Vec<Tab>,
-    /// Index of the tab whose [`TerminalView`] is shown.
-    selected: usize,
-    /// Monotonic counter used to generate unique tab titles.
+    /// Dock layout carrying the open panes.
+    dock_state: DockState<Pane>,
+    /// Monotonic counter used to generate unique pane ids.
     next_number: usize,
 }
 
@@ -27,62 +69,69 @@ impl TerminalTab {
     /// Creates the container with one initial tab.
     pub fn new() -> Self {
         let mut this = Self {
-            tabs: Vec::new(),
-            selected: 0,
+            dock_state: DockState::new(Vec::new()),
             next_number: 1,
         };
         this.open_tab();
         this
     }
 
-    /// Appends a new tab and selects it.
+    /// Appends a new tab to the focused pane.
     pub fn open_tab(&mut self) {
-        self.tabs.push(Tab {
-            title: format!("Shell {}", self.next_number),
-        });
-        self.selected = self.tabs.len() - 1;
-        self.next_number += 1;
+        let pane = self.create_pane();
+        self.dock_state.push_to_focused_leaf(pane);
     }
 
-    /// Closes the tab at `index`, keeping the selection in range.
-    pub fn close_tab(&mut self, index: usize) {
-        if index < self.tabs.len() {
-            self.tabs.remove(index);
-            self.selected = self.selected.min(self.tabs.len().saturating_sub(1));
-        }
-    }
-
-    /// Draws the tab bar and the content area of the selected tab.
+    /// Draws the dock area, or the empty-state hint when all tabs are closed.
     pub fn show(&mut self, ui: &mut Ui) -> Response {
-        self.tab_bar(ui);
-        if self.tabs.is_empty() {
-            empty_area(ui)
-        } else {
-            TerminalView::new().ui(ui)
+        if self.dock_state.iter_all_tabs().next().is_none() {
+            return self.empty_area(ui);
         }
+
+        let mut viewer = TerminalTabViewer { pending_add: None };
+        DockArea::new(&mut self.dock_state)
+            .style(Style::from_egui(ui.style()))
+            .show_add_buttons(true)
+            .show_inside(ui, &mut viewer);
+
+        // The viewer cannot touch `dock_state` while the dock area borrows
+        // it, so additions requested via the `+` button are applied here.
+        if let Some(path) = viewer.pending_add {
+            let pane = self.create_pane();
+            if let Ok(leaf) = self.dock_state.leaf_mut(path) {
+                leaf.append_tab(pane);
+            }
+        }
+
+        ui.response()
     }
 
-    /// Draws the row of tab buttons.
-    fn tab_bar(&mut self, ui: &mut Ui) {
-        ui.horizontal(|ui| {
-            let mut to_close = None;
-            for index in 0..self.tabs.len() {
-                let title = self.tabs[index].title.clone();
-                let selected = index == self.selected;
-                if ui.selectable_label(selected, title).clicked() {
-                    self.selected = index;
-                }
-                if ui.small_button("×").clicked() {
-                    to_close = Some(index);
-                }
-            }
-            if ui.button("+").on_hover_text("Open a new tab").clicked() {
-                self.open_tab();
-            }
-            if let Some(index) = to_close {
-                self.close_tab(index);
-            }
-        });
+    /// Builds a pane with the next free number.
+    fn create_pane(&mut self) -> Pane {
+        let pane = Pane {
+            id: self.next_number,
+            view: TerminalView::new(),
+        };
+        self.next_number += 1;
+        pane
+    }
+
+    /// Paints the empty-state background with a way to open a tab.
+    fn empty_area(&mut self, ui: &mut Ui) -> Response {
+        let (rect, response) = ui.allocate_exact_size(ui.available_size(), Sense::hover());
+        ui.painter().rect_filled(rect, 0.0, Color32::BLACK);
+
+        let mut center = ui.new_child(
+            UiBuilder::new()
+                .max_rect(rect)
+                .layout(Layout::top_down(Align::Center)),
+        );
+        center.add_space((rect.height() / 2.0 - 30.0).max(0.0));
+        center.weak("No open tabs");
+        if center.button("Open a new tab").clicked() {
+            self.open_tab();
+        }
+        response
     }
 }
 
@@ -90,18 +139,4 @@ impl Default for TerminalTab {
     fn default() -> Self {
         Self::new()
     }
-}
-
-/// Paints the empty-state background with a hint on how to open a tab.
-fn empty_area(ui: &mut Ui) -> Response {
-    let (rect, response) = ui.allocate_exact_size(ui.available_size(), Sense::hover());
-    ui.painter().rect_filled(rect, 0.0, Color32::BLACK);
-    ui.painter().text(
-        rect.center(),
-        Align2::CENTER_CENTER,
-        "No open tabs — click + to add one",
-        FontId::default(),
-        Color32::from_gray(120),
-    );
-    response
 }

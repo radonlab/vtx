@@ -19,6 +19,17 @@ impl TerminalView {
             background: Color32::BLACK,
         }
     }
+
+    /// Draws the view, keeping its state across frames.
+    ///
+    /// Unlike the [`Widget`] implementation, this method takes `&mut self`,
+    /// which allows long-lived views (e.g. one per terminal session) to carry
+    /// state between frames.
+    pub fn show(&mut self, ui: &mut Ui) -> Response {
+        let (rect, response) = ui.allocate_exact_size(ui.available_size(), Sense::hover());
+        ui.painter().rect_filled(rect, 0.0, self.background);
+        response
+    }
 }
 
 impl Default for TerminalView {
@@ -28,9 +39,7 @@ impl Default for TerminalView {
 }
 
 impl Widget for TerminalView {
-    fn ui(self, ui: &mut Ui) -> Response {
-        let (rect, response) = ui.allocate_exact_size(ui.available_size(), Sense::hover());
-        ui.painter().rect_filled(rect, 0.0, self.background);
-        response
+    fn ui(mut self, ui: &mut Ui) -> Response {
+        self.show(ui)
     }
 }
