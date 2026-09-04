@@ -8,6 +8,7 @@ license.workspace = true
 
 [dependencies]
 portable-pty.workspace = true
+tokio.workspace = true
 unicode-width.workspace = true
 vte.workspace = true
 
