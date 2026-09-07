@@ -5,6 +5,7 @@
 
 pub mod cell;
 pub mod line;
+pub mod session;
 
 /// Application configuration.
 #[derive(Debug, Clone)]
