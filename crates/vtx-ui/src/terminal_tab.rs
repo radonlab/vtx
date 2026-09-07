@@ -3,7 +3,7 @@
 use egui::{Align, Color32, Id, Layout, Response, Sense, Ui, UiBuilder, WidgetText};
 use egui_dock::{DockArea, DockState, NodePath, Style, TabViewer};
 
-use super::TerminalView;
+use crate::terminal_view::TerminalView;
 
 /// One dockable terminal session shown as a tab in the dock area.
 struct Pane {
@@ -80,6 +80,16 @@ impl TerminalTab {
     pub fn open_tab(&mut self) {
         let pane = self.create_pane();
         self.dock_state.push_to_focused_leaf(pane);
+    }
+
+    /// Mutable access to the terminal views of all open tabs.
+    ///
+    /// Used by the application to feed sessions until input handling and
+    /// the PTY bridge move into the view itself.
+    pub fn views_mut(&mut self) -> impl Iterator<Item = &mut TerminalView> {
+        self.dock_state
+            .iter_all_tabs_mut()
+            .map(|(_path, pane)| &mut pane.view)
     }
 
     /// Draws the dock area, or the empty-state hint when all tabs are closed.

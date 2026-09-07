@@ -5,6 +5,8 @@
 
 mod terminal_tab;
 mod terminal_view;
+mod theme;
 
 pub use terminal_tab::TerminalTab;
 pub use terminal_view::TerminalView;
+pub use theme::Theme;
