@@ -10,7 +10,7 @@ license.workspace = true
 portable-pty.workspace = true
 tokio.workspace = true
 unicode-width.workspace = true
-vte.workspace = true
+vtparse.workspace = true
 
 [lints]
 workspace = true

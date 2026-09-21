@@ -23,7 +23,7 @@ egui_dock = "0.21"
 portable-pty = "0.9"
 tokio = "1.53"
 unicode-width = "0.2"
-vte = "0.15"
+vtparse = "0.7"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
