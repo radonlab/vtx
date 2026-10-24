@@ -11,6 +11,7 @@ license = "Apache-2.0"
 [workspace.dependencies]
 vtx-core = { path = "crates/vtx-core" }
 vtx-ui = { path = "crates/vtx-ui" }
+alacritty_terminal = { path = "crates/alacritty_terminal" }
 
 eframe = { version = "0.36", default-features = false, features = [
   "default_fonts",
@@ -20,9 +21,6 @@ eframe = { version = "0.36", default-features = false, features = [
 ] }
 egui = "0.36"
 egui_dock = "0.21"
-portable-pty = "0.9"
-unicode-width = "0.2"
-vte = "0.15"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
