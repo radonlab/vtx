@@ -5,6 +5,8 @@
 
 pub mod cell;
 pub mod grid;
+pub mod index;
+pub mod mode;
 
 /// Application configuration.
 #[derive(Debug, Clone)]
