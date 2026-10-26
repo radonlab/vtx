@@ -4,9 +4,12 @@
 //! `vtx-ui` and `vtx-app`.
 
 pub mod cell;
+pub mod color;
 pub mod grid;
 pub mod index;
 pub mod mode;
+
+mod theme;
 
 /// Application configuration.
 #[derive(Debug, Clone)]
