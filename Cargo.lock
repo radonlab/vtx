@@ -131,6 +131,9 @@ name = "bitflags"
 version = "2.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b588b76d00fde79687d7646a9b5bdf3cc0f655e0bbd080335a95d7e96f3587da"
+dependencies = [
+ "serde_core",
+]
 
 [[package]]
 name = "block2"
@@ -2012,6 +2015,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4148590afebada386688f18773da617792bf2ef03ffc1e4cbd2b1d45b023e0ba"
 dependencies = [
  "serde_core",
+ "serde_derive",
 ]
 
 [[package]]
@@ -2400,7 +2404,11 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a5924018406ce0063cd67f8e008104968b74b563ee1b85dde3ed1f7cb87d3dbd"
 dependencies = [
  "arrayvec",
+ "bitflags 2.13.1",
+ "cursor-icon",
+ "log",
  "memchr",
+ "serde",
 ]
 
 [[package]]
@@ -2417,7 +2425,9 @@ dependencies = [
 name = "vtx-core"
 version = "0.1.0"
 dependencies = [
+ "bitflags 2.13.1",
  "portable-pty",
+ "serde",
  "unicode-width",
  "vte",
 ]

@@ -3,6 +3,9 @@
 //! This crate is GUI-agnostic and is intended to be reused by
 //! `vtx-ui` and `vtx-app`.
 
+pub mod cell;
+pub mod grid;
+
 /// Application configuration.
 #[derive(Debug, Clone)]
 pub struct AppConfig {
