@@ -168,6 +168,13 @@ pub struct CellExtra {
     hyperlink: Option<Hyperlink>,
 }
 
+impl CellExtra {
+    /// Zero-width characters rendered on top of the base character.
+    pub fn zerowidth(&self) -> &[char] {
+        &self.zerowidth
+    }
+}
+
 /// Content and attributes of a single cell in the terminal grid.
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
