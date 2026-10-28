@@ -8,6 +8,7 @@ pub mod color;
 pub mod grid;
 pub mod index;
 pub mod mode;
+pub mod term;
 
 mod theme;
 
