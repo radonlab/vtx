@@ -1,25 +1,55 @@
 //! Tests for the terminal state machine.
 
+use std::sync::mpsc::{Receiver, channel};
+
 use vte::ansi::{Color, NamedColor, Processor, Rgb};
 
 use super::Term;
 use crate::cell::Flags;
+use crate::event::{Event, EventListener, VoidListener};
 use crate::index::{Column, Line, Point};
 
+/// Event listener recording events into a channel.
+#[derive(Clone)]
+struct RecordingListener(std::sync::mpsc::Sender<Event>);
+
+impl RecordingListener {
+    /// Create a listener and its event receiver.
+    fn new() -> (Self, Receiver<Event>) {
+        let (tx, rx) = channel();
+        (Self(tx), rx)
+    }
+}
+
+impl EventListener for RecordingListener {
+    fn send_event(&self, event: Event) {
+        let _ = self.0.send(event);
+    }
+}
+
+/// Drain all events currently pending on the receiver.
+fn drain(receiver: &Receiver<Event>) -> Vec<Event> {
+    let mut events = Vec::new();
+    while let Ok(event) = receiver.try_recv() {
+        events.push(event);
+    }
+    events
+}
+
 /// Create a 10x5 terminal without scrollback.
-fn term() -> Term {
-    Term::new(10, 5, 0)
+fn term() -> Term<VoidListener> {
+    Term::new(10, 5, 0, VoidListener)
 }
 
 /// Feed a string into the terminal, as if it came from the PTY.
-fn feed(term: &mut Term, content: &str) {
+fn feed<T: EventListener>(term: &mut Term<T>, content: &str) {
     let mut processor: Processor = Processor::new();
     processor.advance(term, content.as_bytes());
 }
 
 /// Assert the cursor's position and wrap state.
 #[track_caller]
-fn assert_cursor(term: &Term, line: i32, column: usize, needs_wrap: bool) {
+fn assert_cursor<T: EventListener>(term: &Term<T>, line: i32, column: usize, needs_wrap: bool) {
     assert_eq!(
         term.cursor_point(),
         Point::new(Line(line), Column(column)),
@@ -473,4 +503,44 @@ fn sgr_underline_styles() {
             .flags
             .intersects(Flags::ALL_UNDERLINES)
     );
+}
+
+#[test]
+fn device_status_reports() {
+    let (listener, receiver) = RecordingListener::new();
+    let mut term = Term::new(10, 5, 0, listener);
+
+    // Status report.
+    feed(&mut term, "\x1b[5n");
+    assert_eq!(
+        drain(&receiver),
+        vec![Event::PtyWrite("\x1b[0n".to_owned())]
+    );
+
+    // Cursor position report is 1-based and reflects the current cursor.
+    feed(&mut term, "ab\x1b[6n");
+    assert_eq!(
+        drain(&receiver),
+        vec![Event::PtyWrite("\x1b[1;3R".to_owned())]
+    );
+
+    // Unknown device status queries produce no reply.
+    feed(&mut term, "\x1b[7n");
+    assert_eq!(drain(&receiver), Vec::new());
+}
+
+#[test]
+fn identify_terminal_reports_primary_attributes() {
+    let (listener, receiver) = RecordingListener::new();
+    let mut term = Term::new(10, 5, 0, listener);
+
+    feed(&mut term, "\x1b[c");
+    assert_eq!(
+        drain(&receiver),
+        vec![Event::PtyWrite("\x1b[?6c".to_owned())]
+    );
+
+    // Secondary device attributes are not reported yet.
+    feed(&mut term, "\x1b[>c");
+    assert_eq!(drain(&receiver), Vec::new());
 }

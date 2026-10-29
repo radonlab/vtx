@@ -13,6 +13,7 @@ use vte::ansi::{Attr, CharsetIndex, Color, Handler, NamedColor};
 
 use crate::cell::{Cell, Flags};
 use crate::color::Colors;
+use crate::event::{Event, EventListener};
 use crate::grid::{Dimensions, Grid};
 use crate::index::{Column, Line, Point};
 use crate::mode::TermMode;
@@ -24,7 +25,10 @@ mod tests;
 const INITIAL_TABSTOPS: usize = 8;
 
 /// Terminal state: grid, cursor, modes, and the ANSI handler implementation.
-pub struct Term {
+pub struct Term<T> {
+    /// Event proxy for emitting [`Event`]s, like PTY replies.
+    event_proxy: T,
+
     /// Currently active grid.
     grid: Grid<Cell>,
 
@@ -49,10 +53,16 @@ pub struct Term {
     colors: Colors,
 }
 
-impl Term {
+impl<T: EventListener> Term<T> {
     /// Create a new terminal with the given dimensions and scrollback limit.
-    pub fn new(columns: usize, screen_lines: usize, history_size: usize) -> Term {
+    pub fn new(
+        columns: usize,
+        screen_lines: usize,
+        history_size: usize,
+        event_proxy: T,
+    ) -> Term<T> {
         Term {
+            event_proxy,
             grid: Grid::new(screen_lines, columns, history_size),
             active_charset: CharsetIndex::default(),
             tabs: TabStops::new(columns),
@@ -182,7 +192,7 @@ impl Term {
     }
 }
 
-impl Dimensions for Term {
+impl<T: EventListener> Dimensions for Term<T> {
     #[inline]
     fn total_lines(&self) -> usize {
         self.grid.total_lines()
@@ -199,7 +209,7 @@ impl Dimensions for Term {
     }
 }
 
-impl vte::ansi::Handler for Term {
+impl<T: EventListener> vte::ansi::Handler for Term<T> {
     /// A character to be displayed.
     #[inline(never)]
     fn input(&mut self, c: char) {
@@ -427,6 +437,37 @@ impl vte::ansi::Handler for Term {
     /// wired up yet; the sequence is accepted but ignored for now.
     #[inline]
     fn bell(&mut self) {}
+
+    /// Identify the terminal (should write back to the pty stream).
+    ///
+    /// Primary device attributes are answered as a VT102 with sixel
+    /// graphics support, matching alacritty's report.
+    #[inline]
+    fn identify_terminal(&mut self, intermediate: Option<char>) {
+        if intermediate.is_none() {
+            let text = String::from("\x1b[?6c");
+            self.event_proxy.send_event(Event::PtyWrite(text));
+        }
+    }
+
+    /// Report device status.
+    #[inline]
+    fn device_status(&mut self, arg: usize) {
+        match arg {
+            // Device status report.
+            5 => {
+                let text = String::from("\x1b[0n");
+                self.event_proxy.send_event(Event::PtyWrite(text));
+            }
+            // Cursor position report.
+            6 => {
+                let pos = self.grid.cursor.point;
+                let text = format!("\x1b[{};{}R", pos.line + 1, pos.column + 1);
+                self.event_proxy.send_event(Event::PtyWrite(text));
+            }
+            _ => (),
+        };
+    }
 
     /// Clear current line.
     #[inline]
