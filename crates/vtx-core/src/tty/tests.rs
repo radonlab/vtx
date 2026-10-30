@@ -185,7 +185,8 @@ fn spawn_read_marker_and_wait() {
         "unexpected output: {output:?}"
     );
 
-    let status = tty.child().wait().expect("waiting for the child failed");
+    let mut child = tty.take_child().expect("taking the child failed");
+    let status = child.wait().expect("waiting for the child failed");
     assert!(status.success(), "the child exited with {status}");
 }
 
@@ -202,7 +203,8 @@ fn resize_while_child_runs() {
     };
     tty.resize(size).expect("resizing the TTY failed");
 
-    let status = tty.child().wait().expect("waiting for the child failed");
+    let mut child = tty.take_child().expect("taking the child failed");
+    let status = child.wait().expect("waiting for the child failed");
     assert!(status.success(), "the child exited with {status}");
 }
 
@@ -216,6 +218,7 @@ fn writer_can_be_taken_once() {
         "a second writer must not be handed out"
     );
 
-    let status = tty.child().wait().expect("waiting for the child failed");
+    let mut child = tty.take_child().expect("taking the child failed");
+    let status = child.wait().expect("waiting for the child failed");
     assert!(status.success(), "the child exited with {status}");
 }

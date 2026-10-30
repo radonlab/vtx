@@ -26,6 +26,12 @@ pub type TtyWriter = Box<dyn io::Write + Send>;
 /// Child process of a TTY.
 pub type TtyChild = Box<dyn Child + Send + Sync>;
 
+/// Handle for terminating the child process of a TTY.
+///
+/// Cloned from the child before ownership moves to the reaper thread, so the
+/// session can still kill the process when it goes away.
+pub type TtyKiller = Box<dyn portable_pty::ChildKiller + Send + Sync>;
+
 /// Size of a TTY.
 ///
 /// Mirrors `portable_pty::PtySize` without leaking the dependency through
@@ -66,8 +72,12 @@ pub trait Tty: Send {
     /// Resize the TTY.
     fn resize(&mut self, size: TtySize) -> io::Result<()>;
 
-    /// Access the child process spawned inside the TTY.
-    fn child(&mut self) -> &mut (dyn Child + Send + Sync);
+    /// Take the child process out of the TTY.
+    ///
+    /// Ownership transfers to the caller, which is responsible for reaping
+    /// the process; the session runs a watcher thread for this. Taking the
+    /// child twice is an error.
+    fn take_child(&mut self) -> io::Result<TtyChild>;
 }
 
 /// Configuration for spawning a [`Tty`].

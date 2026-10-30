@@ -2,7 +2,7 @@
 
 use std::io;
 
-use portable_pty::{Child, CommandBuilder, MasterPty, native_pty_system};
+use portable_pty::{CommandBuilder, MasterPty, native_pty_system};
 
 use super::{Options, Shell, Tty, TtyChild, TtyReader, TtySize, TtyWriter};
 
@@ -13,7 +13,9 @@ pub struct LocalTty {
     master: Box<dyn MasterPty + Send>,
 
     /// Child process spawned inside the PTY.
-    child: TtyChild,
+    ///
+    /// Held until [`Tty::take_child`] moves it out to the reaper.
+    child: Option<TtyChild>,
 }
 
 impl LocalTty {
@@ -32,7 +34,7 @@ impl LocalTty {
 
         Ok(Self {
             master: pair.master,
-            child,
+            child: Some(child),
         })
     }
 }
@@ -50,8 +52,10 @@ impl Tty for LocalTty {
         self.master.resize(size.into()).map_err(io_error)
     }
 
-    fn child(&mut self) -> &mut (dyn Child + Send + Sync) {
-        &mut *self.child
+    fn take_child(&mut self) -> io::Result<TtyChild> {
+        self.child
+            .take()
+            .ok_or_else(|| io::Error::other("the child process was already taken from this TTY"))
     }
 }
 

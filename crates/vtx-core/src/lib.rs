@@ -10,6 +10,7 @@ pub mod event_loop;
 pub mod grid;
 pub mod index;
 pub mod mode;
+pub mod session;
 pub mod sync;
 pub mod term;
 pub mod tty;
