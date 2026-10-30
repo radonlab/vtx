@@ -11,5 +11,8 @@ egui.workspace = true
 egui_dock.workspace = true
 vtx-core.workspace = true
 
+[dev-dependencies]
+vte.workspace = true
+
 [lints]
 workspace = true

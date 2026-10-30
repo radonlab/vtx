@@ -2,6 +2,8 @@
 
 use egui::{Align, Color32, Id, Layout, Response, Sense, Ui, UiBuilder, WidgetText};
 use egui_dock::{DockArea, DockState, NodePath, Style, TabViewer};
+use vtx_core::event::VoidListener;
+use vtx_core::term::Term;
 
 use super::TerminalView;
 
@@ -9,6 +11,9 @@ use super::TerminalView;
 struct Pane {
     /// Unique number used for the tab id and title.
     id: usize,
+    /// Placeholder terminal rendered by the view until the app milestone
+    /// wires real sessions into the dock.
+    term: Term<VoidListener>,
     /// Terminal screen rendered inside the tab.
     view: TerminalView,
 }
@@ -16,7 +21,7 @@ struct Pane {
 impl Pane {
     /// Draws the terminal screen.
     fn show(&mut self, ui: &mut Ui) -> Response {
-        self.view.show(ui)
+        self.view.show(ui, &self.term)
     }
 }
 
@@ -110,6 +115,7 @@ impl TerminalTab {
     fn create_pane(&mut self) -> Pane {
         let pane = Pane {
             id: self.next_number,
+            term: Term::new(80, 24, 0, VoidListener),
             view: TerminalView::new(),
         };
         self.next_number += 1;
