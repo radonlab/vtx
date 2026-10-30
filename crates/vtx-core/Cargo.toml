@@ -12,6 +12,7 @@ serde = ["dep:serde", "bitflags/serde", "vte/serde"]
 
 [dependencies]
 bitflags.workspace = true
+log.workspace = true
 parking_lot.workspace = true
 portable-pty.workspace = true
 serde = { workspace = true, optional = true }
