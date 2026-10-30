@@ -6,6 +6,7 @@
 pub mod cell;
 pub mod color;
 pub mod event;
+pub mod event_loop;
 pub mod grid;
 pub mod index;
 pub mod mode;

@@ -24,6 +24,14 @@ mod tests;
 /// Number of columns between automatically created tabstops.
 const INITIAL_TABSTOPS: usize = 8;
 
+/// Minimum number of columns.
+///
+/// A minimum of 2 is necessary to hold fullwidth unicode characters.
+pub const MIN_COLUMNS: usize = 2;
+
+/// Minimum number of visible lines.
+pub const MIN_SCREEN_LINES: usize = 1;
+
 /// Terminal state: grid, cursor, modes, and the ANSI handler implementation.
 pub struct Term<T> {
     /// Event proxy for emitting [`Event`]s, like PTY replies.
@@ -95,6 +103,34 @@ impl<T: EventListener> Term<T> {
     /// The terminal's runtime color overrides.
     pub fn colors(&self) -> &Colors {
         &self.colors
+    }
+
+    /// Resize the terminal to the given dimensions.
+    ///
+    /// Minimal port of upstream `Term::resize`: vi mode cursor tracking,
+    /// selection rotation, damage bookkeeping, and the alternate screen grid
+    /// land together with their features in later milestones.
+    pub fn resize(&mut self, columns: usize, screen_lines: usize) {
+        let old_cols = self.grid.columns();
+        let old_lines = self.grid.screen_lines();
+
+        let num_cols = columns.max(MIN_COLUMNS);
+        let num_lines = screen_lines.max(MIN_SCREEN_LINES);
+
+        if old_cols == num_cols && old_lines == num_lines {
+            return;
+        }
+
+        // The primary grid reflows into the new dimensions.
+        self.grid.resize(true, num_lines, num_cols);
+
+        // Recreate the tabstop list when the width changed.
+        if old_cols != num_cols {
+            self.tabs.resize(num_cols);
+        }
+
+        // Reset the scrolling region.
+        self.scroll_region = Line(0)..Line(self.screen_lines() as i32);
     }
 
     /// Insert a linebreak at the current cursor position.
@@ -594,6 +630,19 @@ impl TabStops {
         TabStops {
             tabs: (0..columns).map(|i| i % INITIAL_TABSTOPS == 0).collect(),
         }
+    }
+
+    /// Resize the tabstop list to the given number of columns.
+    ///
+    /// Newly covered columns follow the default interval pattern, matching
+    /// upstream behavior.
+    fn resize(&mut self, columns: usize) {
+        let mut index = self.tabs.len();
+        self.tabs.resize_with(columns, || {
+            let is_tabstop = index.is_multiple_of(INITIAL_TABSTOPS);
+            index += 1;
+            is_tabstop
+        });
     }
 }
 

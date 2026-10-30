@@ -1,5 +1,7 @@
 //! Terminal events and the listener interface.
 
+use std::sync::mpsc::Sender;
+
 /// Terminal event.
 ///
 /// These events instruct the UI over changes that can't be handled by the
@@ -36,6 +38,30 @@ pub trait EventListener {
 pub struct VoidListener;
 
 impl EventListener for VoidListener {}
+
+/// Forwards terminal events into a channel.
+///
+/// Terminal replies, like device status reports, are parsed on the session's
+/// reader thread and drained back into the PTY from there.
+#[derive(Debug, Clone)]
+pub struct EventProxy {
+    sender: Sender<Event>,
+}
+
+impl EventProxy {
+    /// Create a proxy forwarding events to the given sender.
+    pub fn new(sender: Sender<Event>) -> Self {
+        Self { sender }
+    }
+}
+
+impl EventListener for EventProxy {
+    fn send_event(&self, event: Event) {
+        // A closed channel means nobody is draining replies anymore; drop
+        // them instead of failing the parser.
+        let _ = self.sender.send(event);
+    }
+}
 
 #[cfg(test)]
 mod tests {
