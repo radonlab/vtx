@@ -2,7 +2,7 @@
 
 use std::io;
 
-use portable_pty::{CommandBuilder, MasterPty, native_pty_system};
+use portable_pty::{CommandBuilder, MasterPty, SlavePty, native_pty_system};
 
 use super::{Options, Shell, Tty, TtyChild, TtyReader, TtySize, TtyWriter};
 
@@ -12,6 +12,10 @@ pub struct LocalTty {
     /// PTY master; owns the reader/writer/resize endpoints.
     master: Box<dyn MasterPty + Send>,
 
+    /// PTY slave, held until [`Tty::spawn_child`] starts the child through
+    /// it and drops it.
+    slave: Option<Box<dyn SlavePty + Send>>,
+
     /// Child process spawned inside the PTY.
     ///
     /// Held until [`Tty::take_child`] moves it out to the reaper.
@@ -19,22 +23,21 @@ pub struct LocalTty {
 }
 
 impl LocalTty {
-    /// Spawn the configured shell inside a new pseudoterminal.
-    pub fn new(options: &Options, size: TtySize) -> io::Result<Self> {
-        let pty_system = native_pty_system();
-        let pair = pty_system.openpty(size.into()).map_err(io_error)?;
-
-        let child = pair
-            .slave
-            .spawn_command(build_command(options))
-            .map_err(io_error)?;
-
-        // Drop the slave so the reader observes EOF once the child exits.
-        drop(pair.slave);
+    /// Open a new pseudoterminal of `size`, without a child process.
+    ///
+    /// The child is spawned separately through [`Tty::spawn_child`], so the
+    /// caller can start the reader first. On Windows, ConPTY starts with
+    /// `PSEUDOCONSOLE_INHERIT_CURSOR`: conhost queries the cursor position
+    /// while the child connects and blocks the spawn until a reply is
+    /// written to the PTY. Without a running reader to produce that reply,
+    /// the spawn stalls for the query timeout, roughly ten seconds.
+    pub fn new(size: TtySize) -> io::Result<Self> {
+        let pair = native_pty_system().openpty(size.into()).map_err(io_error)?;
 
         Ok(Self {
             master: pair.master,
-            child: Some(child),
+            slave: Some(pair.slave),
+            child: None,
         })
     }
 }
@@ -46,6 +49,22 @@ impl Tty for LocalTty {
 
     fn writer(&mut self) -> io::Result<TtyWriter> {
         self.master.take_writer().map_err(io_error)
+    }
+
+    fn spawn_child(&mut self, options: &Options) -> io::Result<()> {
+        let slave = self.slave.take().ok_or_else(|| {
+            io::Error::other("the child process was already spawned in this TTY")
+        })?;
+
+        let command = build_command(options);
+        let child = slave.spawn_command(command).map_err(io_error)?;
+
+        // Drop the slave so the reader observes EOF once the child exits;
+        // the child's inherited stdio keeps the TTY open until then.
+        drop(slave);
+
+        self.child = Some(child);
+        Ok(())
     }
 
     fn resize(&mut self, size: TtySize) -> io::Result<()> {

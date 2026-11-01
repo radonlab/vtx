@@ -69,6 +69,15 @@ pub trait Tty: Send {
     /// There is only one writer; taking it twice returns an error.
     fn writer(&mut self) -> io::Result<TtyWriter>;
 
+    /// Spawn the child process inside the TTY.
+    ///
+    /// Split from opening the TTY on purpose: on Windows, ConPTY queries the
+    /// cursor position while the child connects and blocks the spawn until a
+    /// reply is written back. Callers therefore take the reader and start
+    /// draining it before spawning, so the reply is on its way while the
+    /// child connects; otherwise the spawn stalls for the query timeout.
+    fn spawn_child(&mut self, options: &Options) -> io::Result<()>;
+
     /// Resize the TTY.
     fn resize(&mut self, size: TtySize) -> io::Result<()>;
 
@@ -80,7 +89,7 @@ pub trait Tty: Send {
     fn take_child(&mut self) -> io::Result<TtyChild>;
 }
 
-/// Configuration for spawning a [`Tty`].
+/// Configuration for the child process of a [`Tty`].
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Options {
     /// Shell options.

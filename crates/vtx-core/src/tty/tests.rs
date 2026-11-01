@@ -2,10 +2,11 @@
 //!
 //! These run against a real pseudoterminal. On Windows, `portable-pty`'s
 //! ConPTY backend passes `INHERIT_CURSOR`, which makes conhost emit a
-//! cursor position query (`ESC [6n`) and block the child until it receives
-//! a reply. The pump below is a minimal terminal driver which parses the
-//! output through `Term` and writes PTY replies back; the same loop will
-//! move into `event_loop` in the next milestone.
+//! cursor position query (`ESC [6n`) and block the child spawn until it
+//! receives a reply. The pump below is a minimal terminal driver which
+//! parses the output through `Term` and writes PTY replies back; the
+//! session's event loop is the production version of the same idea, which
+//! is why both start their reader before spawning the child.
 
 use std::io::{Read, Write};
 use std::sync::mpsc;
@@ -14,7 +15,7 @@ use std::time::Duration;
 
 use vte::ansi::Processor;
 
-use super::{LocalTty, Options, Shell, Tty, TtySize};
+use super::{LocalTty, Options, Shell, Tty, TtyReader, TtySize, TtyWriter};
 use crate::event::{Event, EventListener};
 use crate::term::Term;
 
@@ -62,26 +63,21 @@ fn sleeping_options() -> Options {
     }
 }
 
-fn spawn(options: &Options) -> LocalTty {
-    let size = TtySize {
-        rows: 24,
-        cols: 80,
-        ..TtySize::default()
-    };
-    LocalTty::new(options, size).expect("spawning the child failed")
-}
-
-/// Spawn a child and pump its output through a [`Term`], writing PTY
-/// replies (like the ConPTY startup cursor query) back to the child.
+/// Start the pump thread for the TTY streams.
 ///
-/// Returns the TTY together with the raw output accumulated until `marker`
-/// appeared. The pump thread stays parked on the reader afterwards; ConPTY
-/// never signals EOF on its own, and the thread dies with the test process.
-fn pump_until_marker(options: &Options, marker: &'static [u8]) -> (LocalTty, String) {
-    let mut tty = spawn(options);
-    let mut reader = tty.reader().expect("taking the reader failed");
-    let mut writer = tty.writer().expect("taking the writer failed");
-
+/// The pump is a minimal terminal driver: it parses output through a
+/// [`Term`], writes PTY replies (like the ConPTY startup cursor query) back
+/// to the child, and reports the accumulated output once `marker` appeared.
+/// It then stays parked on the reader; ConPTY never signals EOF on its own,
+/// and the thread dies with the test process.
+///
+/// Returns the receiver the pump reports through; when the TTY closes, it
+/// delivers whatever output arrived before the close.
+fn start_pump(
+    mut reader: TtyReader,
+    mut writer: TtyWriter,
+    marker: &'static [u8],
+) -> mpsc::Receiver<String> {
     let (tx, rx) = mpsc::channel();
     thread::spawn(move || {
         let (event_tx, event_rx) = mpsc::channel();
@@ -94,7 +90,7 @@ fn pump_until_marker(options: &Options, marker: &'static [u8]) -> (LocalTty, Str
         loop {
             match reader.read(&mut chunk) {
                 Ok(0) | Err(_) => {
-                    let _ = tx.send(output);
+                    let _ = tx.send(String::from_utf8_lossy(&output).into_owned());
                     return;
                 }
                 Ok(n) => {
@@ -109,7 +105,7 @@ fn pump_until_marker(options: &Options, marker: &'static [u8]) -> (LocalTty, Str
                     }
 
                     if output.windows(marker.len()).any(|w| w == marker) {
-                        let _ = tx.send(output);
+                        let _ = tx.send(String::from_utf8_lossy(&output).into_owned());
                         // Keep the writer alive so the child's stdin stays
                         // open; ConPTY never delivers EOF anyway.
                         loop {
@@ -120,60 +116,41 @@ fn pump_until_marker(options: &Options, marker: &'static [u8]) -> (LocalTty, Str
             }
         }
     });
-
-    let output = rx
-        .recv_timeout(Duration::from_secs(20))
-        .expect("did not observe the marker within 20 seconds");
-    (tty, String::from_utf8_lossy(&output).into_owned())
+    rx
 }
 
-/// On Windows, complete the ConPTY startup handshake by pumping until the
-/// first output bytes arrive; other platforms need no handshake.
-fn complete_startup_handshake(tty: &mut LocalTty) {
-    #[cfg(windows)]
-    {
-        let mut reader = tty.reader().expect("taking the reader failed");
-        let mut writer = tty.writer().expect("taking the writer failed");
+/// Open a TTY, start the pump, and spawn the child.
+///
+/// The pump runs before the child connects: conhost blocks the spawn on its
+/// startup cursor query until a reply arrives, and the pump is the reply
+/// source. `marker` tells the pump when to report its output; tests that do
+/// not inspect it pass a marker that never matches and get the output when
+/// the TTY closes instead.
+fn spawn_pumped(options: &Options, marker: &'static [u8]) -> (LocalTty, mpsc::Receiver<String>) {
+    let size = TtySize {
+        rows: 24,
+        cols: 80,
+        ..TtySize::default()
+    };
+    let mut tty = LocalTty::new(size).expect("opening the TTY failed");
+    let reader = tty.reader().expect("taking the reader failed");
+    let writer = tty.writer().expect("taking the writer failed");
 
-        let (tx, rx) = mpsc::channel();
-        thread::spawn(move || {
-            let (event_tx, event_rx) = mpsc::channel();
-            let listener = ChannelListener(event_tx);
-            let mut term = Term::new(80, 24, 0, listener);
-            let mut processor: Processor = Processor::new();
+    let output = start_pump(reader, writer, marker);
 
-            let mut chunk = [0u8; 4096];
-            match reader.read(&mut chunk) {
-                Ok(0) | Err(_) => (),
-                Ok(n) => {
-                    processor.advance(&mut term, &chunk[..n]);
+    tty.spawn_child(options).expect("spawning the child failed");
+    (tty, output)
+}
 
-                    while let Ok(event) = event_rx.try_recv() {
-                        if let Event::PtyWrite(text) = event {
-                            let _ = writer.write_all(text.as_bytes());
-                            let _ = writer.flush();
-                        }
-                    }
-
-                    // Startup queries like the cursor position report
-                    // are answered; the child can proceed from here.
-                    let _ = tx.send(());
-                    loop {
-                        thread::park();
-                    }
-                }
-            }
-        });
-
-        rx.recv_timeout(Duration::from_secs(5))
-            .expect("no ConPTY output within 5 seconds");
-    }
-
-    #[cfg(not(windows))]
-    {
-        // Nothing to do: no startup handshake on unix pseudoterminals.
-        let _ = tty;
-    }
+/// Spawn a child and pump its output until `marker` appears.
+///
+/// Returns the TTY together with the raw output accumulated until then.
+fn pump_until_marker(options: &Options, marker: &'static [u8]) -> (LocalTty, String) {
+    let (tty, output) = spawn_pumped(options, marker);
+    let output = output
+        .recv_timeout(Duration::from_secs(20))
+        .expect("did not observe the marker within 20 seconds");
+    (tty, output)
 }
 
 #[test]
@@ -192,9 +169,9 @@ fn spawn_read_marker_and_wait() {
 
 #[test]
 fn resize_while_child_runs() {
-    let mut tty = spawn(&sleeping_options());
-
-    complete_startup_handshake(&mut tty);
+    // The marker never appears in the child's output; the pump's report is
+    // not inspected, and the child is expected to outlive the resize.
+    let (mut tty, _output) = spawn_pumped(&sleeping_options(), b"vtx_resize_marker");
 
     let size = TtySize {
         rows: 30,
