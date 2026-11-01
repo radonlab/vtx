@@ -12,7 +12,7 @@ use std::thread::JoinHandle;
 use parking_lot::Mutex;
 
 use crate::event::{Event, EventProxy};
-use crate::event_loop::{EventLoop, ExitCodeSlot, SharedWriter};
+use crate::event_loop::{EventLoop, ExitCodeSlot, SharedWriter, spawn_child_watcher};
 use crate::sync::FairMutex;
 use crate::term::Term;
 use crate::tty::{LocalTty, Options, Tty, TtyKiller, TtySize};
@@ -31,8 +31,9 @@ pub struct TerminalSession {
     /// Handle for terminating the child when the session goes away.
     killer: TtyKiller,
 
-    /// Channel receiving wakeup and exit events.
-    events: Receiver<Event>,
+    /// Channel receiving wakeup and exit events; taken by the single
+    /// consumer that wants to observe the session.
+    events: Option<Receiver<Event>>,
 
     /// Exit code slot, filled by the child watcher.
     exit_code: ExitCodeSlot,
@@ -47,12 +48,14 @@ impl TerminalSession {
     /// `history_size` limits the number of scrollback lines kept beyond the
     /// viewport.
     pub fn new(options: &Options, size: TtySize, history_size: usize) -> io::Result<Self> {
-        let mut tty: Box<dyn Tty> = Box::new(LocalTty::new(options, size)?);
-
+        // Open the TTY and take its endpoints before spawning the child: on
+        // Windows, ConPTY queries the cursor position while the child
+        // connects and blocks the spawn until a reply is written to the PTY.
+        // The reader thread is the reply source, so it must run first;
+        // otherwise the spawn stalls for the query timeout.
+        let mut tty: Box<dyn Tty> = Box::new(LocalTty::new(size)?);
         let reader = tty.reader()?;
         let writer = tty.writer()?;
-        let child = tty.take_child()?;
-        let killer = child.clone_killer();
 
         // Events for the UI, and replies from the terminal back into the PTY.
         let (event_sender, events) = mpsc::channel();
@@ -65,22 +68,30 @@ impl TerminalSession {
         let writer: SharedWriter = Arc::new(Mutex::new(writer));
         let exit_code = ExitCodeSlot::default();
 
-        let child_watcher = EventLoop::new(
+        // The reader answers startup queries, like the ConPTY cursor
+        // position report, without a roundtrip through the UI.
+        EventLoop::new(
             reader,
             Arc::clone(&writer),
-            child,
             Arc::clone(&terminal),
             reply_receiver,
-            event_sender,
+            event_sender.clone(),
         )
-        .spawn(Arc::clone(&exit_code))?;
+        .spawn()?;
+
+        // With the reply source in place, the child can connect promptly.
+        tty.spawn_child(options)?;
+        let child = tty.take_child()?;
+        let killer = child.clone_killer();
+
+        let child_watcher = spawn_child_watcher(child, Arc::clone(&exit_code), event_sender)?;
 
         Ok(Self {
             terminal,
             tty,
             writer,
             killer,
-            events,
+            events: Some(events),
             exit_code,
             child_watcher: Some(child_watcher),
         })
@@ -91,10 +102,14 @@ impl TerminalSession {
         &self.terminal
     }
 
-    /// The channel of terminal events: wakeup on new content, exit once the
-    /// child terminated.
-    pub fn events(&self) -> &Receiver<Event> {
-        &self.events
+    /// Take the channel of terminal events: wakeup on new content, exit once
+    /// the child terminated.
+    ///
+    /// A channel receiver cannot be cloned, so the event stream has exactly
+    /// one consumer: the first caller to take it owns it from then on, later
+    /// calls return [`None`].
+    pub fn take_events(&mut self) -> Option<Receiver<Event>> {
+        self.events.take()
     }
 
     /// Write input, like keypresses, to the child process.
@@ -158,7 +173,7 @@ mod tests {
     use crate::term::Term;
     use crate::tty::{Options, Shell, TtySize};
 
-    use std::sync::mpsc::RecvTimeoutError;
+    use std::sync::mpsc::{Receiver, RecvTimeoutError};
 
     /// Options for a command printing `marker` and exiting.
     fn echo_options(marker: &str) -> Options {
@@ -218,7 +233,7 @@ mod tests {
     }
 
     /// Wait for the exit event, ignoring wakeups on the way.
-    fn wait_for_exit(session: &TerminalSession) {
+    fn wait_for_exit(events: &Receiver<Event>) {
         let deadline = Instant::now() + Duration::from_secs(20);
         loop {
             let remaining = deadline.saturating_duration_since(Instant::now());
@@ -227,7 +242,7 @@ mod tests {
                 "the child did not exit within 20 seconds"
             );
 
-            match session.events().recv_timeout(remaining) {
+            match events.recv_timeout(remaining) {
                 Ok(Event::Exit) => return,
                 Ok(_) => (),
                 Err(RecvTimeoutError::Timeout) => {
@@ -247,17 +262,26 @@ mod tests {
 
         // The reader thread answers the ConPTY startup queries on its own,
         // so no explicit handshake is needed here.
-        wait_for_exit(&session);
+        let events = session.take_events().expect("the events were taken");
+        wait_for_exit(&events);
 
         session.join();
         assert_eq!(session.exit_code(), Some(0));
         assert!(session.is_exited());
 
-        let text = visible_text(session.terminal());
-        assert!(
-            text.contains("vtx_session_smoke"),
-            "unexpected output: {text:?}"
-        );
+        // The exit notification races the reader draining the TTY: the
+        // child can terminate before its final output is parsed. The exit
+        // means the child terminated, so no new output can appear after
+        // this point; poll until the existing output lands.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let text = visible_text(session.terminal());
+            if text.contains("vtx_session_smoke") {
+                break;
+            }
+            assert!(Instant::now() < deadline, "unexpected output: {text:?}");
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 
     #[test]

@@ -1,9 +1,11 @@
 //! Event loop for the PTY data path.
 //!
 //! Unlike upstream, which multiplexes the PTY through a polling loop, the
-//! `portable-pty` endpoints use blocking IO. [`EventLoop`] therefore runs
+//! `portable-pty` endpoints use blocking IO. The data path therefore runs
 //! two dedicated threads: a reader parsing child output into the terminal,
-//! and a child watcher reporting the process exit.
+//! and a child watcher reporting the process exit. They start separately:
+//! the reader must run before the child spawns, because it answers the
+//! queries ConPTY sends while the child connects.
 
 use std::io::{self, ErrorKind, Write};
 use std::sync::Arc;
@@ -44,9 +46,6 @@ pub struct EventLoop {
     /// PTY writer shared with the session.
     writer: SharedWriter,
 
-    /// Child process, reaped by the watcher thread.
-    child: TtyChild,
-
     /// Terminal state, shared with the UI.
     terminal: Arc<FairMutex<Term<EventProxy>>>,
 
@@ -62,7 +61,6 @@ impl EventLoop {
     pub fn new(
         reader: TtyReader,
         writer: SharedWriter,
-        child: TtyChild,
         terminal: Arc<FairMutex<Term<EventProxy>>>,
         reply_receiver: Receiver<Event>,
         event_sender: Sender<Event>,
@@ -70,43 +68,49 @@ impl EventLoop {
         Self {
             reader,
             writer,
-            child,
             terminal,
             reply_receiver,
             event_sender,
         }
     }
 
-    /// Start the reader and child watcher threads.
+    /// Start the reader thread.
     ///
-    /// Returns the watcher's join handle, which is signaled once the exit
-    /// code is recorded. The reader's handle is dropped on purpose,
-    /// detaching the thread: ConPTY never delivers EOF, so on Windows the
-    /// reader can only end with the process itself.
-    pub fn spawn(self, exit_code: ExitCodeSlot) -> io::Result<JoinHandle<()>> {
+    /// This must happen before the child spawns: ConPTY queries the cursor
+    /// position while the child connects, and blocks the spawn until a
+    /// terminal answers; the reader, parsing through the terminal, is the
+    /// reply source. The thread's handle is dropped on purpose, detaching
+    /// it: ConPTY never delivers EOF, so on Windows the reader can only end
+    /// with the process itself.
+    pub fn spawn(self) -> io::Result<()> {
         let Self {
             reader,
             writer,
-            child,
             terminal,
             reply_receiver,
             event_sender,
         } = self;
 
-        // Child watcher: reaps the process, records the exit code, and
-        // signals the session.
-        let watcher_sender = event_sender.clone();
-        let watcher = Builder::new()
-            .name("vtx-child-watcher".to_owned())
-            .spawn(move || run_child_watcher(child, exit_code, watcher_sender))?;
-
-        // Reader: parses the child's output into the terminal.
         Builder::new()
             .name("vtx-pty-reader".to_owned())
             .spawn(move || run_reader(reader, writer, terminal, reply_receiver, event_sender))?;
-
-        Ok(watcher)
+        Ok(())
     }
+}
+
+/// Start the child watcher thread.
+///
+/// It reaps the child process, records the exit code in `exit_code`, and
+/// signals the session. Returns the watcher's join handle, which is
+/// signaled once the exit code is recorded.
+pub fn spawn_child_watcher(
+    child: TtyChild,
+    exit_code: ExitCodeSlot,
+    event_sender: Sender<Event>,
+) -> io::Result<JoinHandle<()>> {
+    Builder::new()
+        .name("vtx-child-watcher".to_owned())
+        .spawn(move || run_child_watcher(child, exit_code, event_sender))
 }
 
 /// Read child output into the terminal until the TTY closes.
