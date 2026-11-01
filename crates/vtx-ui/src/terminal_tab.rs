@@ -1,27 +1,80 @@
 //! Dockable container hosting one [`TerminalView`] per session.
 
+use std::io;
+use std::thread;
+
 use egui::{Align, Color32, Id, Layout, Response, Sense, Ui, UiBuilder, WidgetText};
 use egui_dock::{DockArea, DockState, NodePath, Style, TabViewer};
-use vtx_core::event::VoidListener;
-use vtx_core::term::Term;
+use vtx_core::session::TerminalSession;
+use vtx_core::tty::{Options, TtySize};
 
 use super::TerminalView;
+
+/// Scrollback lines kept beyond the viewport.
+const HISTORY_SIZE: usize = 10_000;
+
+/// Columns and rows a session starts with.
+///
+/// Sessions spawn before the first layout pass, when the viewport size is
+/// still unknown; the view adopts the real size on its first frame.
+const INITIAL_SIZE: (u16, u16) = (80, 24);
 
 /// One dockable terminal session shown as a tab in the dock area.
 struct Pane {
     /// Unique number used for the tab id and title.
     id: usize,
-    /// Placeholder terminal rendered by the view until the app milestone
-    /// wires real sessions into the dock.
-    term: Term<VoidListener>,
+    /// The terminal session behind this tab.
+    session: TerminalSession,
     /// Terminal screen rendered inside the tab.
     view: TerminalView,
 }
 
 impl Pane {
+    /// Spawns a session running the default shell.
+    fn new(id: usize) -> io::Result<Self> {
+        let (cols, rows) = INITIAL_SIZE;
+        let size = TtySize {
+            rows,
+            cols,
+            ..TtySize::default()
+        };
+        let session = TerminalSession::new(&Options::default(), size, HISTORY_SIZE)?;
+        Ok(Self {
+            id,
+            session,
+            view: TerminalView::new(),
+        })
+    }
+
     /// Draws the terminal screen.
     fn show(&mut self, ui: &mut Ui) -> Response {
-        self.view.show(ui, &self.term)
+        // Hand the event channel to a waker thread once: every wakeup, like
+        // new output or the child exiting, schedules a repaint of this
+        // context. The channel has a single receiver, so only the first
+        // frame can take it.
+        if let Some(events) = self.session.take_events() {
+            let ctx = ui.ctx().clone();
+            let waker = thread::Builder::new()
+                .name("vtx-event-waker".to_owned())
+                .spawn(move || {
+                    while events.recv().is_ok() {
+                        ctx.request_repaint();
+                    }
+                });
+            if let Err(err) = waker {
+                log::warn!("spawning the event waker failed: {err}");
+            }
+        }
+
+        let response = self.view.show(ui, &mut self.session);
+
+        // Reap the child watcher once the child is gone; joining is
+        // idempotent, and the watcher finishes right after the exit.
+        if self.session.is_exited() {
+            self.session.join();
+        }
+
+        response
     }
 }
 
@@ -83,8 +136,9 @@ impl TerminalTab {
 
     /// Appends a new tab to the focused pane.
     pub fn open_tab(&mut self) {
-        let pane = self.create_pane();
-        self.dock_state.push_to_focused_leaf(pane);
+        if let Some(pane) = self.try_create_pane() {
+            self.dock_state.push_to_focused_leaf(pane);
+        }
     }
 
     /// Draws the dock area, or the empty-state hint when all tabs are closed.
@@ -101,25 +155,27 @@ impl TerminalTab {
 
         // The viewer cannot touch `dock_state` while the dock area borrows
         // it, so additions requested via the `+` button are applied here.
-        if let Some(path) = viewer.pending_add {
-            let pane = self.create_pane();
-            if let Ok(leaf) = self.dock_state.leaf_mut(path) {
-                leaf.append_tab(pane);
-            }
+        if let Some(path) = viewer.pending_add
+            && let Some(pane) = self.try_create_pane()
+            && let Ok(leaf) = self.dock_state.leaf_mut(path)
+        {
+            leaf.append_tab(pane);
         }
 
         ui.response()
     }
 
-    /// Builds a pane with the next free number.
-    fn create_pane(&mut self) -> Pane {
-        let pane = Pane {
-            id: self.next_number,
-            term: Term::new(80, 24, 0, VoidListener),
-            view: TerminalView::new(),
+    /// Builds a pane with the next free number, if its session spawns.
+    fn try_create_pane(&mut self) -> Option<Pane> {
+        let pane = match Pane::new(self.next_number) {
+            Ok(pane) => pane,
+            Err(err) => {
+                log::error!("spawning the session failed: {err}");
+                return None;
+            }
         };
         self.next_number += 1;
-        pane
+        Some(pane)
     }
 
     /// Paints the empty-state background with a way to open a tab.

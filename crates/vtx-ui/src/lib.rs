@@ -4,6 +4,7 @@
 //! they can be embedded into any egui application.
 
 mod font;
+mod input;
 mod render;
 mod terminal_tab;
 mod terminal_view;
