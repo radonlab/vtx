@@ -34,6 +34,9 @@ mod tests;
 /// Number of columns between automatically created tabstops.
 const INITIAL_TABSTOPS: usize = 8;
 
+/// Max size of the window title stack.
+const TITLE_STACK_MAX_DEPTH: usize = 4096;
+
 /// Minimum number of columns.
 ///
 /// A minimum of 2 is necessary to hold fullwidth unicode characters.
@@ -80,6 +83,12 @@ pub struct Term<T> {
 
     /// Modified terminal colors.
     colors: Colors,
+
+    /// Window title set by the application (OSC 0/2).
+    title: Option<String>,
+
+    /// Saved window titles (CSI 22/23 t).
+    title_stack: Vec<Option<String>>,
 }
 
 impl<T: EventListener> Term<T> {
@@ -100,6 +109,8 @@ impl<T: EventListener> Term<T> {
             mode: TermMode::default(),
             scroll_region: Line(0)..Line(screen_lines as i32),
             colors: Colors::default(),
+            title: None,
+            title_stack: Vec::new(),
         }
     }
 
@@ -126,6 +137,11 @@ impl<T: EventListener> Term<T> {
     /// The terminal's runtime color overrides.
     pub fn colors(&self) -> &Colors {
         &self.colors
+    }
+
+    /// The window title set by the application, if any.
+    pub fn title(&self) -> Option<&str> {
+        self.title.as_deref()
     }
 
     /// Whether the application requested mouse event reporting.
@@ -642,10 +658,12 @@ impl<T: EventListener> vte::ansi::Handler for Term<T> {
 
     /// Ring the bell.
     ///
-    /// Bell events are forwarded through the event system, which is not
-    /// wired up yet; the sequence is accepted but ignored for now.
+    /// The event is forwarded through the event system; the frontend
+    /// decides whether to flash the display or play a sound.
     #[inline]
-    fn bell(&mut self) {}
+    fn bell(&mut self) {
+        self.event_proxy.send_event(Event::Bell);
+    }
 
     /// Identify the terminal (should write back to the pty stream).
     ///
@@ -898,6 +916,8 @@ impl<T: EventListener> vte::ansi::Handler for Term<T> {
         self.inactive_grid.reset();
         self.scroll_region = Line(0)..Line(self.screen_lines() as i32);
         self.tabs = TabStops::new(self.columns());
+        self.title_stack.clear();
+        self.title = None;
 
         // Preserve vi mode across resets.
         self.mode &= TermMode::VI;
@@ -1097,6 +1117,40 @@ impl<T: EventListener> vte::ansi::Handler for Term<T> {
     #[inline]
     fn unset_keypad_application_mode(&mut self) {
         self.mode.remove(TermMode::APP_KEYPAD);
+    }
+
+    /// Set the window title (OSC 0/2).
+    ///
+    /// `None` resets the title to the frontend's default. Empty titles are
+    /// normalized to `None`, since an empty title carries no meaning for
+    /// the frontend.
+    #[inline]
+    fn set_title(&mut self, title: Option<String>) {
+        let title = title.filter(|title| !title.is_empty());
+        self.title.clone_from(&title);
+
+        let title_event = match title {
+            Some(title) => Event::Title(title),
+            None => Event::ResetTitle,
+        };
+        self.event_proxy.send_event(title_event);
+    }
+
+    /// Push the current title onto the title stack (`CSI 22 t`).
+    #[inline]
+    fn push_title(&mut self) {
+        if self.title_stack.len() >= TITLE_STACK_MAX_DEPTH {
+            self.title_stack.remove(0);
+        }
+        self.title_stack.push(self.title.clone());
+    }
+
+    /// Pop the last title from the stack (`CSI 23 t`).
+    #[inline]
+    fn pop_title(&mut self) {
+        if let Some(popped) = self.title_stack.pop() {
+            self.set_title(popped);
+        }
     }
 }
 

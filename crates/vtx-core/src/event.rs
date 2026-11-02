@@ -7,9 +7,9 @@ use std::sync::mpsc::Sender;
 /// These events instruct the UI over changes that can't be handled by the
 /// terminal emulation layer itself.
 ///
-/// The M1 set covers the events required to drive the PTY data loop; bell,
-/// title, clipboard, and color report events land together with their
-/// terminal features in later milestones.
+/// The M1 set covers the events required to drive the PTY data loop;
+/// clipboard and color report events land together with their terminal
+/// features in later milestones.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Event {
     /// Write some text to the PTY.
@@ -23,6 +23,15 @@ pub enum Event {
 
     /// Shutdown request.
     Exit,
+
+    /// Window title change (OSC 0/2).
+    Title(String),
+
+    /// Reset the window title to the default (OSC 0/2 with empty payload).
+    ResetTitle,
+
+    /// Terminal bell (BEL).
+    Bell,
 }
 
 /// Event loop for notifying the UI about terminal events.

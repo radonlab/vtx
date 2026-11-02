@@ -1,9 +1,11 @@
 //! Tests for the terminal state machine.
 
+use std::cell::RefCell;
 use std::sync::mpsc::{Receiver, channel};
 
 use vte::ansi::{Color, NamedColor, Processor, Rgb};
 
+use super::TITLE_STACK_MAX_DEPTH;
 use super::Term;
 use crate::cell::Flags;
 use crate::event::{Event, EventListener, VoidListener};
@@ -1495,4 +1497,107 @@ fn line_feed_new_line_mode() {
 
     feed(&mut term, "\x1b[20l\r");
     assert_cursor(&term, 1, 0, false);
+}
+
+/// Event listener collecting all events for inspection.
+#[derive(Default)]
+struct MockListener {
+    events: RefCell<Vec<Event>>,
+}
+
+impl EventListener for MockListener {
+    fn send_event(&self, event: Event) {
+        self.events.borrow_mut().push(event);
+    }
+}
+
+/// Collecting variant of the standard test terminal.
+fn mock_term() -> Term<MockListener> {
+    Term::new(10, 5, 0, MockListener::default())
+}
+
+#[test]
+fn osc_sets_title() {
+    let mut term = mock_term();
+
+    // OSC 0 terminated by BEL.
+    feed(&mut term, "\x1b]0;my title\x07");
+    assert_eq!(term.title(), Some("my title"));
+    assert_eq!(
+        term.event_proxy.events.borrow().last(),
+        Some(&Event::Title("my title".to_owned()))
+    );
+
+    // OSC 2 terminated by ST.
+    feed(&mut term, "\x1b]2;other\x1b\\");
+    assert_eq!(term.title(), Some("other"));
+
+    // An empty payload resets the title.
+    feed(&mut term, "\x1b]0;\x07");
+    assert_eq!(term.title(), None);
+    assert_eq!(
+        term.event_proxy.events.borrow().last(),
+        Some(&Event::ResetTitle)
+    );
+}
+
+#[test]
+fn bell_sends_event() {
+    let mut term = mock_term();
+
+    feed(&mut term, "\x07");
+
+    assert_eq!(term.event_proxy.events.borrow().last(), Some(&Event::Bell));
+}
+
+#[test]
+fn title_stack_push_pop() {
+    let mut term = mock_term();
+
+    feed(&mut term, "\x1b]2;first\x07");
+    feed(&mut term, "\x1b[22t");
+    feed(&mut term, "\x1b]2;second\x07");
+
+    // Popping restores the pushed title.
+    feed(&mut term, "\x1b[23t");
+    assert_eq!(term.title(), Some("first"));
+    assert_eq!(
+        term.event_proxy.events.borrow().last(),
+        Some(&Event::Title("first".to_owned()))
+    );
+
+    // Popping an empty stack is a no-op.
+    feed(&mut term, "\x1b[23t");
+    assert_eq!(term.title(), Some("first"));
+}
+
+#[test]
+fn title_stack_max_depth() {
+    let mut term = mock_term();
+
+    // Push the initial untitled state first, then a title.
+    feed(&mut term, "\x1b[22t");
+    feed(&mut term, "\x1b]2;base\x07");
+    for _ in 0..TITLE_STACK_MAX_DEPTH {
+        feed(&mut term, "\x1b[22t");
+    }
+
+    // The oldest (untitled) entry was dropped once the stack exceeded its
+    // limit.
+    assert_eq!(term.title_stack.len(), TITLE_STACK_MAX_DEPTH);
+    assert_eq!(term.title_stack[0], Some("base".to_owned()));
+    assert_eq!(term.title_stack.last(), Some(&Some("base".to_owned())));
+}
+
+#[test]
+fn ris_resets_title() {
+    let mut term = mock_term();
+
+    feed(&mut term, "\x1b]2;title\x07");
+    feed(&mut term, "\x1b[22t");
+
+    feed(&mut term, "\x1bc");
+
+    assert_eq!(term.title(), None);
+    assert!(term.title_stack.is_empty());
 }
