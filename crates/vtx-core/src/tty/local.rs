@@ -52,9 +52,10 @@ impl Tty for LocalTty {
     }
 
     fn spawn_child(&mut self, options: &Options) -> io::Result<()> {
-        let slave = self.slave.take().ok_or_else(|| {
-            io::Error::other("the child process was already spawned in this TTY")
-        })?;
+        let slave = self
+            .slave
+            .take()
+            .ok_or_else(|| io::Error::other("the child process was already spawned in this TTY"))?;
 
         let command = build_command(options);
         let child = slave.spawn_command(command).map_err(io_error)?;

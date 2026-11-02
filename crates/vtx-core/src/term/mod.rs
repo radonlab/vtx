@@ -2,19 +2,28 @@
 //!
 //! [`Term`] implements the `vte` ANSI handler trait, translating parsed
 //! escape sequences into grid mutations. The current milestone covers
-//! printable input, basic C0 controls (CR/LF/BS/TAB/BEL), fundamental CSI
-//! sequences (CUP/CUU/CUD/CUF/CUB/ED/EL), and SGR attributes.
+//! printable input, basic C0 controls (CR/LF/BS/TAB/SO/SI/BEL/RI),
+//! fundamental CSI sequences (CUP/CUU/CUD/CUF/CUB/ED/EL), SGR attributes,
+//! the DEC private modes around the alternate screen (DECSET/DECRST,
+//! DECSC/DECRC, RIS, DECAWM), the scrolling region with origin mode
+//! (DECSTBM/DECOM), the line/character editing sequences (ICH/DCH/DL/IL/
+//! ECH), tabstop manipulation (HTS/TBC/CHT/CBT), and the DEC character set
+//! designation/invocation (SCS/SO/SI).
 
 use std::cmp;
+use std::mem;
 use std::ops::{Index, IndexMut, Range};
 
 use unicode_width::UnicodeWidthChar;
-use vte::ansi::{Attr, CharsetIndex, Color, Handler, NamedColor};
+use vte::ansi::{
+    Attr, CharsetIndex, Color, Handler, NamedColor, NamedPrivateMode, PrivateMode, StandardCharset,
+    TabulationClearMode,
+};
 
 use crate::cell::{Cell, Flags};
 use crate::color::Colors;
 use crate::event::{Event, EventListener};
-use crate::grid::{Dimensions, Grid};
+use crate::grid::{Dimensions, Grid, Scroll};
 use crate::index::{Column, Line, Point};
 use crate::mode::TermMode;
 
@@ -38,7 +47,18 @@ pub struct Term<T> {
     event_proxy: T,
 
     /// Currently active grid.
+    ///
+    /// Tracks the screen buffer currently in use. While the alternate
+    /// screen buffer is active, this is the alternate grid. Otherwise it is
+    /// the primary screen buffer.
     grid: Grid<Cell>,
+
+    /// Currently inactive grid.
+    ///
+    /// The opposite of the active grid. While the alternate screen buffer
+    /// is active, this is the primary grid. Otherwise it is the alternate
+    /// screen buffer.
+    inactive_grid: Grid<Cell>,
 
     /// Index into `charsets`, pointing to what ASCII is currently being
     /// mapped to.
@@ -72,6 +92,8 @@ impl<T: EventListener> Term<T> {
         Term {
             event_proxy,
             grid: Grid::new(screen_lines, columns, history_size),
+            // The alternate screen has no scrollback history.
+            inactive_grid: Grid::new(screen_lines, columns, 0),
             active_charset: CharsetIndex::default(),
             tabs: TabStops::new(columns),
             mode: TermMode::default(),
@@ -105,11 +127,28 @@ impl<T: EventListener> Term<T> {
         &self.colors
     }
 
+    /// Scroll the viewport within the scrollback history.
+    ///
+    /// Only the display offset changes; the grid itself is untouched. While
+    /// the offset is non-zero, newly arriving lines keep the viewport
+    /// stationary on the same content, since `Grid::scroll_up` moves the
+    /// offset along with the scrolled lines.
+    ///
+    /// Upstream also clamps the vi mode cursor, invalidates damage, and
+    /// requests a cursor-dirty event here; those arrive with their
+    /// milestones.
+    pub fn scroll_display(&mut self, scroll: Scroll) {
+        self.grid.scroll_display(scroll);
+    }
+
     /// Resize the terminal to the given dimensions.
     ///
+    /// Both grids are resized: the primary screen reflows into the new
+    /// dimensions, while the alternate screen keeps its fixed-size viewport.
+    ///
     /// Minimal port of upstream `Term::resize`: vi mode cursor tracking,
-    /// selection rotation, damage bookkeeping, and the alternate screen grid
-    /// land together with their features in later milestones.
+    /// selection rotation, and damage bookkeeping land together with their
+    /// features in later milestones.
     pub fn resize(&mut self, columns: usize, screen_lines: usize) {
         let old_cols = self.grid.columns();
         let old_lines = self.grid.screen_lines();
@@ -121,8 +160,12 @@ impl<T: EventListener> Term<T> {
             return;
         }
 
-        // The primary grid reflows into the new dimensions.
-        self.grid.resize(true, num_lines, num_cols);
+        // Only the primary screen reflows; it has scrollback to redistribute.
+        // Whichever grid is currently the alternate one is resized without
+        // reflow.
+        let is_alt = self.mode.contains(TermMode::ALT_SCREEN);
+        self.grid.resize(!is_alt, num_lines, num_cols);
+        self.inactive_grid.resize(is_alt, num_lines, num_cols);
 
         // Recreate the tabstop list when the width changed.
         if old_cols != num_cols {
@@ -131,6 +174,29 @@ impl<T: EventListener> Term<T> {
 
         // Reset the scrolling region.
         self.scroll_region = Line(0)..Line(self.screen_lines() as i32);
+    }
+
+    /// Swap primary and alternate screen buffer.
+    ///
+    /// On the way into the alternate screen, the alt grid starts out with
+    /// the primary cursor, the primary screen's saved cursor is dropped, and
+    /// the alt grid contents are cleared. On the way back out, the primary
+    /// screen is restored exactly as it was left.
+    fn swap_alt(&mut self) {
+        if !self.mode.contains(TermMode::ALT_SCREEN) {
+            // Set the alt screen cursor to the current primary screen
+            // cursor.
+            self.inactive_grid.cursor = self.grid.cursor.clone();
+
+            // Drop information about the primary screen's saved cursor.
+            self.grid.saved_cursor = self.grid.cursor.clone();
+
+            // Reset the alternate screen contents.
+            self.inactive_grid.reset_region(..);
+        }
+
+        mem::swap(&mut self.grid, &mut self.inactive_grid);
+        self.mode ^= TermMode::ALT_SCREEN;
     }
 
     /// Insert a linebreak at the current cursor position.
@@ -209,12 +275,7 @@ impl<T: EventListener> Term<T> {
 
     /// Scroll the region down relative to the scroll region's origin.
     ///
-    /// Consumed by reverse index (`ESC M`) and line insert/delete, which are
-    /// not part of the M1 sequence set yet.
-    #[expect(
-        dead_code,
-        reason = "wired up with reverse_index in the next milestone"
-    )]
+    /// Consumed by reverse index (`ESC M`) and line insert (`CSI L`).
     fn scroll_down_relative(&mut self, origin: Line, mut lines: usize) {
         lines = cmp::min(
             lines,
@@ -374,6 +435,36 @@ impl<T: EventListener> vte::ansi::Handler for Term<T> {
         self.goto(self.grid.cursor.point.line.0, col)
     }
 
+    /// Insert blank characters (ICH, `CSI n @`).
+    ///
+    /// Existing characters from the cursor onward shift right; the shifted
+    /// in cells carry the current background color.
+    #[inline]
+    fn insert_blank(&mut self, count: usize) {
+        let cursor = &self.grid.cursor;
+        let bg = cursor.template.bg;
+
+        // Ensure inserting within terminal bounds.
+        let count = cmp::min(count, self.columns() - cursor.point.column.0);
+
+        let source = cursor.point.column;
+        let destination = cursor.point.column.0 + count;
+        let num_cells = self.columns() - destination;
+
+        let line = cursor.point.line;
+        let row = &mut self.grid[line][..];
+
+        for offset in (0..num_cells).rev() {
+            row.swap(destination + offset, source.0 + offset);
+        }
+
+        // Cells were just moved out toward the end of the line; fill in
+        // between source and destination with blanks.
+        for cell in &mut row[source.0..destination] {
+            *cell = bg.into();
+        }
+    }
+
     /// Move cursor up `rows`.
     #[inline]
     fn move_up(&mut self, rows: usize) {
@@ -437,6 +528,72 @@ impl<T: EventListener> vte::ansi::Handler for Term<T> {
                     break;
                 }
             }
+        }
+    }
+
+    /// Move cursor forward `count` tab stops (CHT, `CSI n I`).
+    ///
+    /// The cursor clamps to the last column when no further tabstop exists.
+    #[inline]
+    fn move_forward_tabs(&mut self, count: u16) {
+        let num_cols = self.columns();
+        for _ in 0..count {
+            let mut col = self.grid.cursor.point.column;
+
+            if col.0 == num_cols - 1 {
+                break;
+            }
+
+            for i in col.0 + 1..num_cols {
+                col = Column(i);
+                if self.tabs[col] {
+                    break;
+                }
+            }
+
+            self.grid.cursor.point.column = col;
+        }
+    }
+
+    /// Move cursor backward `count` tab stops (CBT, `CSI n Z`).
+    ///
+    /// The cursor stays at its column when no earlier tabstop exists.
+    #[inline]
+    fn move_backward_tabs(&mut self, count: u16) {
+        for _ in 0..count {
+            let mut col = self.grid.cursor.point.column;
+
+            if col == Column(0) {
+                break;
+            }
+
+            for i in (0..col.0).rev() {
+                if self.tabs[Column(i)] {
+                    col = Column(i);
+                    break;
+                }
+            }
+            self.grid.cursor.point.column = col;
+        }
+    }
+
+    /// Set a tabstop at the cursor position (HTS, `ESC H`).
+    #[inline]
+    fn set_horizontal_tabstop(&mut self) {
+        self.tabs[self.grid.cursor.point.column] = true;
+    }
+
+    /// Clear tab stops (TBC, `CSI n g`).
+    ///
+    /// `CSI 0 g` clears the stop under the cursor; `CSI 3 g` clears all
+    /// stops.
+    #[inline]
+    fn clear_tabs(&mut self, mode: TabulationClearMode) {
+        match mode {
+            TabulationClearMode::Current => {
+                self.tabs[self.grid.cursor.point.column] = false;
+            }
+            TabulationClearMode::All => self.tabs.clear_all(),
         }
     }
 
@@ -521,6 +678,83 @@ impl<T: EventListener> vte::ansi::Handler for Term<T> {
 
         let row = &mut self.grid[point.line];
         for cell in &mut row[left..right] {
+            *cell = bg.into();
+        }
+    }
+
+    /// Insert blank lines (IL, `CSI n L`).
+    ///
+    /// Lines from the cursor down shift toward the region bottom; a no-op
+    /// when the cursor is outside the scrolling region.
+    #[inline]
+    fn insert_blank_lines(&mut self, lines: usize) {
+        let origin = self.grid.cursor.point.line;
+        if self.scroll_region.contains(&origin) {
+            self.scroll_down_relative(origin, lines);
+        }
+    }
+
+    /// Delete lines (DL, `CSI n M`).
+    ///
+    /// Lines below the cursor shift up; a no-op when the cursor is outside
+    /// the scrolling region.
+    #[inline]
+    fn delete_lines(&mut self, lines: usize) {
+        let origin = self.grid.cursor.point.line;
+        let lines = cmp::min(self.screen_lines() - origin.0 as usize, lines);
+
+        if lines > 0 && self.scroll_region.contains(&origin) {
+            self.scroll_up_relative(origin, lines);
+        }
+    }
+
+    /// Erase characters (ECH, `CSI n X`).
+    ///
+    /// The cells are reset to blanks with the current background color;
+    /// nothing shifts.
+    #[inline]
+    fn erase_chars(&mut self, count: usize) {
+        let cursor = &self.grid.cursor;
+
+        let start = cursor.point.column;
+        let end = cmp::min(start + count, Column(self.columns()));
+
+        // Cleared cells have the current background color set.
+        let bg = cursor.template.bg;
+        let line = cursor.point.line;
+        let row = &mut self.grid[line];
+        for cell in &mut row[start..end] {
+            *cell = bg.into();
+        }
+    }
+
+    /// Delete characters (DCH, `CSI n P`).
+    ///
+    /// Like the delete key: everything to the right of the cursor shifts
+    /// left, blanks fill in at the line end.
+    #[inline]
+    fn delete_chars(&mut self, count: usize) {
+        let columns = self.columns();
+        let cursor = &self.grid.cursor;
+        let bg = cursor.template.bg;
+
+        // Ensure deleting within terminal bounds.
+        let count = cmp::min(count, columns);
+
+        let start = cursor.point.column.0;
+        let end = cmp::min(start + count, columns - 1);
+        let num_cells = columns - end;
+
+        let line = cursor.point.line;
+        let row = &mut self.grid[line][..];
+
+        for offset in 0..num_cells {
+            row.swap(start + offset, end + offset);
+        }
+
+        // Clear the last `count` cells in the row.
+        let end = columns - count;
+        for cell in &mut row[end..] {
             *cell = bg.into();
         }
     }
@@ -615,8 +849,157 @@ impl<T: EventListener> vte::ansi::Handler for Term<T> {
             Attr::CancelHidden => cursor.template.flags.remove(Flags::HIDDEN),
             Attr::Strike => cursor.template.flags.insert(Flags::STRIKEOUT),
             Attr::CancelStrike => cursor.template.flags.remove(Flags::STRIKEOUT),
+            // Blink modes are accepted but ignored; text never blinks.
+            Attr::BlinkSlow | Attr::BlinkFast | Attr::CancelBlink => (),
+        }
+    }
+
+    /// Save cursor position (DECSC, `ESC 7` / `CSI s`).
+    #[inline]
+    fn save_cursor_position(&mut self) {
+        self.grid.saved_cursor = self.grid.cursor.clone();
+    }
+
+    /// Restore cursor position (DECRC, `ESC 8` / `CSI u`).
+    #[inline]
+    fn restore_cursor_position(&mut self) {
+        self.grid.cursor = self.grid.saved_cursor.clone();
+    }
+
+    /// Reset the terminal state (RIS, `ESC c`).
+    ///
+    /// A full reset: both grids, the scroll region, the tabstops, and all
+    /// non-default modes are restored to their initial values. A reset
+    /// issued from the alternate screen first swaps back to the primary
+    /// screen.
+    #[inline]
+    fn reset_state(&mut self) {
+        if self.mode.contains(TermMode::ALT_SCREEN) {
+            mem::swap(&mut self.grid, &mut self.inactive_grid);
+        }
+        self.active_charset = CharsetIndex::default();
+        self.grid.reset();
+        self.inactive_grid.reset();
+        self.scroll_region = Line(0)..Line(self.screen_lines() as i32);
+        self.tabs = TabStops::new(self.columns());
+
+        // Preserve vi mode across resets.
+        self.mode &= TermMode::VI;
+        self.mode.insert(TermMode::default());
+    }
+
+    /// Reverse index (RI, `ESC M`).
+    ///
+    /// Move the cursor up one line; at the top of the scrolling region the
+    /// region scrolls down instead.
+    #[inline]
+    fn reverse_index(&mut self) {
+        // If the cursor is at the top of the scrolling region, scroll it.
+        if self.grid.cursor.point.line == self.scroll_region.start {
+            self.scroll_down_relative(self.scroll_region.start, 1);
+        } else {
+            self.grid.cursor.point.line = cmp::max(self.grid.cursor.point.line - 1, Line(0));
+        }
+    }
+
+    /// Set a private mode (DECSET, `CSI ? h`).
+    ///
+    /// Modes for later milestones (mouse reporting, focus reporting,
+    /// bracketed paste, origin, column mode, blinking cursor, synchronized
+    /// updates) are accepted but ignored.
+    #[inline]
+    fn set_private_mode(&mut self, mode: PrivateMode) {
+        let mode = match mode {
+            PrivateMode::Named(mode) => mode,
+            PrivateMode::Unknown(mode) => {
+                log::debug!("ignoring unknown mode {mode} in set_private_mode");
+                return;
+            }
+        };
+
+        match mode {
+            NamedPrivateMode::SwapScreenAndSetRestoreCursor
+                if !self.mode.contains(TermMode::ALT_SCREEN) =>
+            {
+                self.swap_alt();
+            }
+            NamedPrivateMode::LineWrap => self.mode.insert(TermMode::LINE_WRAP),
+            NamedPrivateMode::ShowCursor => self.mode.insert(TermMode::SHOW_CURSOR),
+            NamedPrivateMode::AlternateScroll => self.mode.insert(TermMode::ALTERNATE_SCROLL),
+            NamedPrivateMode::CursorKeys => self.mode.insert(TermMode::APP_CURSOR),
+            NamedPrivateMode::Origin => {
+                self.mode.insert(TermMode::ORIGIN);
+                self.goto(0, 0);
+            }
             _ => (),
         }
+    }
+
+    /// Unset a private mode (DECRST, `CSI ? l`).
+    ///
+    /// See [`set_private_mode`](Term::set_private_mode) for the set of
+    /// supported modes.
+    #[inline]
+    fn unset_private_mode(&mut self, mode: PrivateMode) {
+        let mode = match mode {
+            PrivateMode::Named(mode) => mode,
+            PrivateMode::Unknown(mode) => {
+                log::debug!("ignoring unknown mode {mode} in unset_private_mode");
+                return;
+            }
+        };
+
+        match mode {
+            NamedPrivateMode::SwapScreenAndSetRestoreCursor
+                if self.mode.contains(TermMode::ALT_SCREEN) =>
+            {
+                self.swap_alt();
+            }
+            NamedPrivateMode::LineWrap => self.mode.remove(TermMode::LINE_WRAP),
+            NamedPrivateMode::ShowCursor => self.mode.remove(TermMode::SHOW_CURSOR),
+            NamedPrivateMode::AlternateScroll => self.mode.remove(TermMode::ALTERNATE_SCROLL),
+            NamedPrivateMode::CursorKeys => self.mode.remove(TermMode::APP_CURSOR),
+            NamedPrivateMode::Origin => self.mode.remove(TermMode::ORIGIN),
+            _ => (),
+        }
+    }
+
+    /// Set the terminal scrolling region (DECSTBM, `CSI t;b r`).
+    ///
+    /// Line addresses are 1-based and clamped to the screen. The cursor is
+    /// homed, honoring origin mode.
+    #[inline]
+    fn set_scrolling_region(&mut self, top: usize, bottom: Option<usize>) {
+        // Fallback to the last line as default.
+        let bottom = bottom.unwrap_or_else(|| self.screen_lines());
+
+        if top >= bottom {
+            log::debug!("invalid scrolling region: ({top};{bottom})");
+            return;
+        }
+
+        // Bottom should be included in the range, but range end is not
+        // usually included. One option would be to use an inclusive
+        // range, but instead we just let the open range end be 1 higher.
+        let start = Line(top as i32 - 1);
+        let end = Line(bottom as i32);
+
+        let screen_lines = Line(self.screen_lines() as i32);
+        self.scroll_region.start = cmp::min(start, screen_lines);
+        self.scroll_region.end = cmp::min(end, screen_lines);
+        self.goto(0, 0);
+    }
+
+    /// Assign a character set to G0-G3 (SCS, `ESC ( ) * + <set>`).
+    #[inline]
+    fn configure_charset(&mut self, index: CharsetIndex, charset: StandardCharset) {
+        self.grid.cursor.charsets[index] = charset;
+    }
+
+    /// Invoke one of G0-G3 as the active charset (SO/SI, `C0 0E/0F`).
+    #[inline]
+    fn set_active_charset(&mut self, index: CharsetIndex) {
+        self.active_charset = index;
     }
 }
 
@@ -643,6 +1026,13 @@ impl TabStops {
             index += 1;
             is_tabstop
         });
+    }
+
+    /// Clear all tabstops (TBC `CSI 3 g`).
+    fn clear_all(&mut self) {
+        for tabstop in self.tabs.iter_mut() {
+            *tabstop = false;
+        }
     }
 }
 
