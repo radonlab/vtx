@@ -4,11 +4,12 @@
 //! escape sequences into grid mutations. The current milestone covers
 //! printable input, basic C0 controls (CR/LF/BS/TAB/SO/SI/BEL/RI),
 //! fundamental CSI sequences (CUP/CUU/CUD/CUF/CUB/ED/EL), SGR attributes,
-//! the DEC private modes around the alternate screen (DECSET/DECRST,
-//! DECSC/DECRC, RIS, DECAWM), the scrolling region with origin mode
-//! (DECSTBM/DECOM), the line/character editing sequences (ICH/DCH/DL/IL/
-//! ECH), tabstop manipulation (HTS/TBC/CHT/CBT), and the DEC character set
-//! designation/invocation (SCS/SO/SI).
+//! the DEC private modes around the alternate screen and reporting
+//! protocols (DECSET/DECRST incl. mouse reporting, focus reporting,
+//! bracketed paste; DECSC/DECRC, RIS, DECAWM, DECOM), the scrolling region
+//! (DECSTBM), the line/character editing sequences (ICH/DCH/DL/IL/ECH),
+//! tabstop manipulation (HTS/TBC/CHT/CBT), the DEC character sets (SCS/SO/
+//! SI), and the public modes IRM/LNM.
 
 use std::cmp;
 use std::mem;
@@ -16,8 +17,8 @@ use std::ops::{Index, IndexMut, Range};
 
 use unicode_width::UnicodeWidthChar;
 use vte::ansi::{
-    Attr, CharsetIndex, Color, Handler, NamedColor, NamedPrivateMode, PrivateMode, StandardCharset,
-    TabulationClearMode,
+    Attr, CharsetIndex, Color, Handler, Mode, NamedColor, NamedMode, NamedPrivateMode, PrivateMode,
+    StandardCharset, TabulationClearMode,
 };
 
 use crate::cell::{Cell, Flags};
@@ -125,6 +126,14 @@ impl<T: EventListener> Term<T> {
     /// The terminal's runtime color overrides.
     pub fn colors(&self) -> &Colors {
         &self.colors
+    }
+
+    /// Whether the application requested mouse event reporting.
+    ///
+    /// While active, the frontend encodes mouse events and writes them to
+    /// the PTY instead of selecting text (unless Shift is held).
+    pub fn mouse_mode(&self) -> bool {
+        self.mode.intersects(TermMode::MOUSE_MODE)
     }
 
     /// Scroll the viewport within the scrollback history.
@@ -607,8 +616,15 @@ impl<T: EventListener> vte::ansi::Handler for Term<T> {
     }
 
     /// Carriage return.
+    ///
+    /// A carriage return executes the linefeed control as well while LNM is
+    /// active.
     #[inline]
     fn carriage_return(&mut self) {
+        if self.mode.contains(TermMode::LINE_FEED_NEW_LINE) {
+            self.linefeed();
+        }
+
         self.grid.cursor.point.column = Column(0);
         self.grid.cursor.input_needs_wrap = false;
     }
@@ -931,6 +947,30 @@ impl<T: EventListener> vte::ansi::Handler for Term<T> {
                 self.mode.insert(TermMode::ORIGIN);
                 self.goto(0, 0);
             }
+            // Mouse reporting protocols are mutually exclusive.
+            NamedPrivateMode::ReportMouseClicks => {
+                self.mode.remove(TermMode::MOUSE_MODE);
+                self.mode.insert(TermMode::MOUSE_REPORT_CLICK);
+            }
+            NamedPrivateMode::ReportCellMouseMotion => {
+                self.mode.remove(TermMode::MOUSE_MODE);
+                self.mode.insert(TermMode::MOUSE_DRAG);
+            }
+            NamedPrivateMode::ReportAllMouseMotion => {
+                self.mode.remove(TermMode::MOUSE_MODE);
+                self.mode.insert(TermMode::MOUSE_MOTION);
+            }
+            NamedPrivateMode::ReportFocusInOut => self.mode.insert(TermMode::FOCUS_IN_OUT),
+            NamedPrivateMode::BracketedPaste => self.mode.insert(TermMode::BRACKETED_PASTE),
+            // Mouse reporting encodings are mutually exclusive.
+            NamedPrivateMode::SgrMouse => {
+                self.mode.remove(TermMode::UTF8_MOUSE);
+                self.mode.insert(TermMode::SGR_MOUSE);
+            }
+            NamedPrivateMode::Utf8Mouse => {
+                self.mode.remove(TermMode::SGR_MOUSE);
+                self.mode.insert(TermMode::UTF8_MOUSE);
+            }
             _ => (),
         }
     }
@@ -960,7 +1000,52 @@ impl<T: EventListener> vte::ansi::Handler for Term<T> {
             NamedPrivateMode::AlternateScroll => self.mode.remove(TermMode::ALTERNATE_SCROLL),
             NamedPrivateMode::CursorKeys => self.mode.remove(TermMode::APP_CURSOR),
             NamedPrivateMode::Origin => self.mode.remove(TermMode::ORIGIN),
+            NamedPrivateMode::ReportMouseClicks => self.mode.remove(TermMode::MOUSE_REPORT_CLICK),
+            NamedPrivateMode::ReportCellMouseMotion => self.mode.remove(TermMode::MOUSE_DRAG),
+            NamedPrivateMode::ReportAllMouseMotion => self.mode.remove(TermMode::MOUSE_MOTION),
+            NamedPrivateMode::ReportFocusInOut => self.mode.remove(TermMode::FOCUS_IN_OUT),
+            NamedPrivateMode::BracketedPaste => self.mode.remove(TermMode::BRACKETED_PASTE),
+            NamedPrivateMode::SgrMouse => self.mode.remove(TermMode::SGR_MOUSE),
+            NamedPrivateMode::Utf8Mouse => self.mode.remove(TermMode::UTF8_MOUSE),
             _ => (),
+        }
+    }
+
+    /// Set a public mode (SM, `CSI n h`).
+    ///
+    /// Supports IRM (`4`, insert mode) and LNM (`20`, linefeed/newline).
+    #[inline]
+    fn set_mode(&mut self, mode: Mode) {
+        let mode = match mode {
+            Mode::Named(mode) => mode,
+            Mode::Unknown(mode) => {
+                log::debug!("ignoring unknown mode {mode} in set_mode");
+                return;
+            }
+        };
+
+        match mode {
+            NamedMode::Insert => self.mode.insert(TermMode::INSERT),
+            NamedMode::LineFeedNewLine => self.mode.insert(TermMode::LINE_FEED_NEW_LINE),
+        }
+    }
+
+    /// Unset a public mode (RM, `CSI n l`).
+    ///
+    /// See [`set_mode`](Term::set_mode) for the set of supported modes.
+    #[inline]
+    fn unset_mode(&mut self, mode: Mode) {
+        let mode = match mode {
+            Mode::Named(mode) => mode,
+            Mode::Unknown(mode) => {
+                log::debug!("ignoring unknown mode {mode} in unset_mode");
+                return;
+            }
+        };
+
+        match mode {
+            NamedMode::Insert => self.mode.remove(TermMode::INSERT),
+            NamedMode::LineFeedNewLine => self.mode.remove(TermMode::LINE_FEED_NEW_LINE),
         }
     }
 
@@ -1000,6 +1085,18 @@ impl<T: EventListener> vte::ansi::Handler for Term<T> {
     #[inline]
     fn set_active_charset(&mut self, index: CharsetIndex) {
         self.active_charset = index;
+    }
+
+    /// Enable the application keypad mode (DECKPAM, `ESC =`).
+    #[inline]
+    fn set_keypad_application_mode(&mut self) {
+        self.mode.insert(TermMode::APP_KEYPAD);
+    }
+
+    /// Disable the application keypad mode (DECKPAM, `ESC >`).
+    #[inline]
+    fn unset_keypad_application_mode(&mut self) {
+        self.mode.remove(TermMode::APP_KEYPAD);
     }
 }
 

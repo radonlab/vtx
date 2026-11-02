@@ -1400,3 +1400,99 @@ fn charsets_survive_save_restore_cursor() {
     feed(&mut term, "\x1b8l");
     assert_eq!(term.grid()[Line(0)][Column(0)].c, '┌');
 }
+
+#[test]
+fn mouse_report_modes_are_exclusive() {
+    let mut term = term();
+
+    assert!(!term.mouse_mode());
+
+    // Click reporting.
+    feed(&mut term, "\x1b[?1000h");
+    assert!(term.mouse_mode());
+    assert!(term.mode().contains(TermMode::MOUSE_REPORT_CLICK));
+
+    // Drag reporting replaces click reporting.
+    feed(&mut term, "\x1b[?1002h");
+    assert!(term.mode().contains(TermMode::MOUSE_DRAG));
+    assert!(!term.mode().contains(TermMode::MOUSE_REPORT_CLICK));
+
+    // All-motion reporting replaces drag reporting.
+    feed(&mut term, "\x1b[?1003h");
+    assert!(term.mode().contains(TermMode::MOUSE_MOTION));
+    assert!(!term.mode().contains(TermMode::MOUSE_DRAG));
+
+    // Unsetting one protocol leaves the others off.
+    feed(&mut term, "\x1b[?1003l");
+    assert!(!term.mouse_mode());
+
+    // The encodings are exclusive as well.
+    feed(&mut term, "\x1b[?1005h");
+    assert!(term.mode().contains(TermMode::UTF8_MOUSE));
+    feed(&mut term, "\x1b[?1006h");
+    assert!(term.mode().contains(TermMode::SGR_MOUSE));
+    assert!(!term.mode().contains(TermMode::UTF8_MOUSE));
+}
+
+#[test]
+fn focus_and_bracketed_paste_modes() {
+    let mut term = term();
+
+    feed(&mut term, "\x1b[?1004h\x1b[?2004h");
+    assert!(term.mode().contains(TermMode::FOCUS_IN_OUT));
+    assert!(term.mode().contains(TermMode::BRACKETED_PASTE));
+
+    feed(&mut term, "\x1b[?1004l\x1b[?2004l");
+    assert!(!term.mode().contains(TermMode::FOCUS_IN_OUT));
+    assert!(!term.mode().contains(TermMode::BRACKETED_PASTE));
+
+    // Both survive an RIS reset to defaults.
+    feed(&mut term, "\x1b[?1004h");
+    feed(&mut term, "\x1bc");
+    assert!(!term.mode().contains(TermMode::FOCUS_IN_OUT));
+}
+
+#[test]
+fn keypad_application_mode() {
+    let mut term = term();
+
+    feed(&mut term, "\x1b=");
+    assert!(term.mode().contains(TermMode::APP_KEYPAD));
+
+    feed(&mut term, "\x1b>");
+    assert!(!term.mode().contains(TermMode::APP_KEYPAD));
+}
+
+#[test]
+fn insert_mode_shifts_cells() {
+    let mut term = term();
+
+    feed(&mut term, "ac");
+    feed(&mut term, "\x1b[1;2H");
+
+    // With IRM active, printing shifts the tail to the right.
+    feed(&mut term, "\x1b[4hb");
+    assert_eq!(term.grid()[Line(0)][Column(0)].c, 'a');
+    assert_eq!(term.grid()[Line(0)][Column(1)].c, 'b');
+    assert_eq!(term.grid()[Line(0)][Column(2)].c, 'c');
+
+    // Without IRM, printing overwrites in place.
+    feed(&mut term, "\x1b[4l");
+    feed(&mut term, "\x1b[1;1Hx");
+    assert_eq!(term.grid()[Line(0)][Column(0)].c, 'x');
+    assert_eq!(term.grid()[Line(0)][Column(1)].c, 'b');
+}
+
+#[test]
+fn line_feed_new_line_mode() {
+    let mut term = term();
+
+    feed(&mut term, "ab");
+    feed(&mut term, "\x1b[20h\r");
+
+    // With LNM active, CR behaves like CRLF.
+    assert_cursor(&term, 1, 0, false);
+
+    feed(&mut term, "\x1b[20l\r");
+    assert_cursor(&term, 1, 0, false);
+}
