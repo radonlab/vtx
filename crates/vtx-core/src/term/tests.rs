@@ -1,17 +1,20 @@
 //! Tests for the terminal state machine.
 
 use std::cell::RefCell;
+use std::mem;
 use std::sync::mpsc::{Receiver, channel};
 
 use vte::ansi::{Color, NamedColor, Processor, Rgb};
 
 use super::TITLE_STACK_MAX_DEPTH;
 use super::Term;
-use crate::cell::Flags;
+use super::{CursorShape, CursorStyle};
+use crate::cell::{Cell, Flags};
 use crate::event::{Event, EventListener, VoidListener};
-use crate::grid::{Dimensions, Scroll};
-use crate::index::{Column, Line, Point};
+use crate::grid::{Dimensions, Grid, Scroll};
+use crate::index::{Column, Line, Point, Side};
 use crate::mode::TermMode;
+use crate::selection::SelectionType;
 
 /// Event listener recording events into a channel.
 #[derive(Clone)]
@@ -1600,4 +1603,383 @@ fn ris_resets_title() {
 
     assert_eq!(term.title(), None);
     assert!(term.title_stack.is_empty());
+}
+
+#[test]
+fn simple_selection_works() {
+    let mut term = Term::new(5, 5, 0, VoidListener);
+    let grid = term.grid_mut();
+    for i in 0..4 {
+        if i == 1 {
+            continue;
+        }
+
+        grid[Line(i)][Column(0)].c = '"';
+
+        for j in 1..4 {
+            grid[Line(i)][Column(j)].c = 'a';
+        }
+
+        grid[Line(i)][Column(4)].c = '"';
+    }
+    grid[Line(2)][Column(0)].c = ' ';
+    grid[Line(2)][Column(4)].c = ' ';
+    grid[Line(2)][Column(4)].flags.insert(Flags::WRAPLINE);
+    grid[Line(3)][Column(0)].c = ' ';
+
+    // Multiple lines contain an empty line.
+    term.start_selection(
+        SelectionType::Simple,
+        Point {
+            line: Line(0),
+            column: Column(0),
+        },
+        Side::Left,
+    );
+    term.update_selection(
+        Point {
+            line: Line(2),
+            column: Column(4),
+        },
+        Side::Right,
+    );
+    assert_eq!(
+        term.selection_to_string(),
+        Some(String::from("\"aaa\"\n\n aaa "))
+    );
+
+    // A wrapline.
+    term.start_selection(
+        SelectionType::Simple,
+        Point {
+            line: Line(2),
+            column: Column(0),
+        },
+        Side::Left,
+    );
+    term.update_selection(
+        Point {
+            line: Line(3),
+            column: Column(4),
+        },
+        Side::Right,
+    );
+    assert_eq!(
+        term.selection_to_string(),
+        Some(String::from(" aaa  aaa\""))
+    );
+}
+
+#[test]
+fn semantic_selection_works() {
+    let mut term = Term::new(5, 3, 0, VoidListener);
+    let mut grid: Grid<Cell> = Grid::new(3, 5, 0);
+    for i in 0..5 {
+        for j in 0..2 {
+            grid[Line(j)][Column(i)].c = 'a';
+        }
+    }
+    grid[Line(0)][Column(0)].c = '"';
+    grid[Line(0)][Column(3)].c = '"';
+    grid[Line(1)][Column(2)].c = '"';
+    grid[Line(0)][Column(4)].flags.insert(Flags::WRAPLINE);
+
+    mem::swap(term.grid_mut(), &mut grid);
+
+    {
+        term.start_selection(
+            SelectionType::Semantic,
+            Point {
+                line: Line(0),
+                column: Column(1),
+            },
+            Side::Left,
+        );
+        assert_eq!(term.selection_to_string(), Some(String::from("aa")));
+    }
+
+    {
+        term.start_selection(
+            SelectionType::Semantic,
+            Point {
+                line: Line(0),
+                column: Column(4),
+            },
+            Side::Left,
+        );
+        assert_eq!(term.selection_to_string(), Some(String::from("aaa")));
+    }
+
+    {
+        term.start_selection(
+            SelectionType::Semantic,
+            Point {
+                line: Line(1),
+                column: Column(1),
+            },
+            Side::Left,
+        );
+        assert_eq!(term.selection_to_string(), Some(String::from("aaa")));
+    }
+}
+
+#[test]
+fn line_selection_works() {
+    let mut term = Term::new(5, 1, 0, VoidListener);
+    let mut grid: Grid<Cell> = Grid::new(1, 5, 0);
+    for i in 0..5 {
+        grid[Line(0)][Column(i)].c = 'a';
+    }
+    grid[Line(0)][Column(0)].c = '"';
+    grid[Line(0)][Column(3)].c = '"';
+
+    mem::swap(term.grid_mut(), &mut grid);
+
+    term.start_selection(
+        SelectionType::Lines,
+        Point {
+            line: Line(0),
+            column: Column(3),
+        },
+        Side::Left,
+    );
+    assert_eq!(term.selection_to_string(), Some(String::from("\"aa\"a\n")));
+}
+
+#[test]
+fn block_selection_works() {
+    let mut term = Term::new(5, 5, 0, VoidListener);
+    let grid = term.grid_mut();
+    for i in 1..4 {
+        grid[Line(i)][Column(0)].c = '"';
+
+        for j in 1..4 {
+            grid[Line(i)][Column(j)].c = 'a';
+        }
+
+        grid[Line(i)][Column(4)].c = '"';
+    }
+    grid[Line(2)][Column(2)].c = ' ';
+    grid[Line(2)][Column(4)].flags.insert(Flags::WRAPLINE);
+    grid[Line(3)][Column(4)].c = ' ';
+
+    term.start_selection(
+        SelectionType::Block,
+        Point {
+            line: Line(0),
+            column: Column(3),
+        },
+        Side::Left,
+    );
+
+    // The same column.
+    term.update_selection(
+        Point {
+            line: Line(3),
+            column: Column(3),
+        },
+        Side::Right,
+    );
+    assert_eq!(term.selection_to_string(), Some(String::from("\na\na\na")));
+
+    // The first column.
+    term.update_selection(
+        Point {
+            line: Line(3),
+            column: Column(0),
+        },
+        Side::Left,
+    );
+    assert_eq!(
+        term.selection_to_string(),
+        Some(String::from("\n\"aa\n\"a\n\"aa"))
+    );
+
+    // The last column.
+    term.update_selection(
+        Point {
+            line: Line(3),
+            column: Column(4),
+        },
+        Side::Right,
+    );
+    assert_eq!(
+        term.selection_to_string(),
+        Some(String::from("\na\"\na\"\na"))
+    );
+}
+
+#[test]
+fn scrolling_rotates_the_selection() {
+    let mut term = Term::new(10, 5, 10, VoidListener);
+
+    feed(&mut term, "line\r\n");
+    term.start_selection(
+        SelectionType::Simple,
+        Point {
+            line: Line(0),
+            column: Column(0),
+        },
+        Side::Left,
+    );
+    term.update_selection(
+        Point {
+            line: Line(0),
+            column: Column(3),
+        },
+        Side::Right,
+    );
+    assert!(term.selection_range().is_some());
+
+    // Scroll the viewport content up by three lines: the cursor starts on
+    // line 1, so the fourth through sixth linefeed hit the region bottom.
+    feed(&mut term, "\r\n\r\n\r\n\r\n\r\n\r\n");
+
+    // The selection moved up with the content.
+    let range = term.selection_range().unwrap();
+    assert_eq!(range.start, Point::new(Line(-3), Column(0)));
+    assert_eq!(range.end, Point::new(Line(-3), Column(3)));
+}
+
+#[test]
+fn resize_drops_selection_on_width_change() {
+    let mut term = Term::new(10, 5, 0, VoidListener);
+
+    term.start_selection(
+        SelectionType::Simple,
+        Point {
+            line: Line(0),
+            column: Column(0),
+        },
+        Side::Left,
+    );
+    term.update_selection(
+        Point {
+            line: Line(1),
+            column: Column(3),
+        },
+        Side::Right,
+    );
+    assert!(term.selection_range().is_some());
+
+    term.resize(8, 5);
+
+    assert_eq!(term.selection_range(), None);
+}
+
+#[test]
+fn clear_screen_drops_selection() {
+    let mut term = mock_term();
+
+    term.start_selection(
+        SelectionType::Simple,
+        Point {
+            line: Line(0),
+            column: Column(0),
+        },
+        Side::Left,
+    );
+    term.update_selection(
+        Point {
+            line: Line(2),
+            column: Column(3),
+        },
+        Side::Right,
+    );
+    assert!(term.selection_range().is_some());
+
+    feed(&mut term, "\x1b[2J");
+
+    assert_eq!(term.selection_range(), None);
+}
+
+#[test]
+fn decscusr_sets_cursor_style() {
+    let mut term = mock_term();
+    assert_eq!(term.cursor_style(), None);
+
+    // 1: blinking block, 2: steady block.
+    feed(&mut term, "\x1b[1 q");
+    assert_eq!(
+        term.cursor_style(),
+        Some(CursorStyle {
+            shape: CursorShape::Block,
+            blinking: true
+        })
+    );
+    feed(&mut term, "\x1b[2 q");
+    assert_eq!(
+        term.cursor_style(),
+        Some(CursorStyle {
+            shape: CursorShape::Block,
+            blinking: false
+        })
+    );
+
+    // 3/4: underline, 5/6: beam.
+    feed(&mut term, "\x1b[3 q");
+    assert_eq!(
+        term.cursor_style(),
+        Some(CursorStyle {
+            shape: CursorShape::Underline,
+            blinking: true
+        })
+    );
+    feed(&mut term, "\x1b[4 q");
+    assert_eq!(
+        term.cursor_style(),
+        Some(CursorStyle {
+            shape: CursorShape::Underline,
+            blinking: false
+        })
+    );
+    feed(&mut term, "\x1b[5 q");
+    assert_eq!(
+        term.cursor_style(),
+        Some(CursorStyle {
+            shape: CursorShape::Beam,
+            blinking: true
+        })
+    );
+    feed(&mut term, "\x1b[6 q");
+    assert_eq!(
+        term.cursor_style(),
+        Some(CursorStyle {
+            shape: CursorShape::Beam,
+            blinking: false
+        })
+    );
+
+    // 0: back to the frontend default.
+    feed(&mut term, "\x1b[0 q");
+    assert_eq!(term.cursor_style(), None);
+}
+
+#[test]
+fn ris_resets_cursor_style() {
+    let mut term = mock_term();
+
+    feed(&mut term, "\x1b[3 q");
+    assert!(term.cursor_style().is_some());
+
+    feed(&mut term, "\x1bc");
+    assert_eq!(term.cursor_style(), None);
+}
+
+#[test]
+fn osc8_attaches_links_to_cells() {
+    let mut term = mock_term();
+
+    feed(
+        &mut term,
+        "\x1b]8;;https://example.com\x1b\\link\x1b]8;;\x1b\\plain",
+    );
+
+    let link = term.grid()[Line(0)][Column(0)]
+        .hyperlink()
+        .expect("written cells carry the link");
+    assert_eq!(link.uri(), "https://example.com");
+
+    // The link ends with the closing OSC 8, so later text is plain.
+    assert_eq!(term.grid()[Line(0)][Column(4)].hyperlink(), None);
 }

@@ -126,6 +126,14 @@ impl<T> Row<T> {
         self.inner.len()
     }
 
+    /// Visible length of the row.
+    ///
+    /// Trailing empty cells beyond the last written one do not count.
+    #[inline]
+    pub fn line_length(&self) -> Column {
+        Column(self.occ)
+    }
+
     /// Get the last cell in the row.
     #[inline]
     pub fn last(&self) -> Option<&T> {

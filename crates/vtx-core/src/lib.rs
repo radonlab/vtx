@@ -11,6 +11,7 @@ pub mod grid;
 pub mod index;
 pub mod mode;
 pub mod mouse;
+pub mod selection;
 pub mod session;
 pub mod sync;
 pub mod term;
