@@ -154,12 +154,17 @@ impl TerminalView {
 
             if response.has_focus() && !exited {
                 input = input::encode(&events, *term.mode());
-                input.extend_from_slice(&self.ime(&events));
+                let (ime_input, composing) = self.ime(&events);
+                input.extend_from_slice(&ime_input);
 
-                if !input.is_empty() {
-                    // Typing and pasting clear the selection, return the
-                    // viewport to the bottom, and restart the cursor blink,
-                    // like upstream.
+                if !input.is_empty() || composing {
+                    // Typing, pasting, and starting an IME composition clear
+                    // the selection, return the viewport to the bottom, and
+                    // restart the cursor blink, like upstream. The
+                    // composition start must count as input too: with an
+                    // IME, keystrokes become preedit events instead of
+                    // text, and skipping the scroll would leave the
+                    // composition anchored outside the scrolled viewport.
                     term.clear_selection();
                     if term.grid().display_offset() != 0 {
                         term.scroll_display(Scroll::Bottom);
@@ -225,9 +230,14 @@ impl TerminalView {
 
             // Position the IME candidate window at the terminal cursor.
             let cursor_pos = if cell_size.x > 0.0 && cell_size.y > 0.0 {
+                let grid = term.grid();
                 let point = term.cursor_point();
-                let display_offset = term.grid().display_offset() as i32;
-                let row = point.line.0 + display_offset;
+                // Clamp the anchor into the viewport: egui needs an IME rect
+                // every focused frame to keep the IME enabled, but a cursor
+                // scrolled out of view would push the candidate window and
+                // the preedit outside the terminal.
+                let row = (point.line.0 + grid.display_offset() as i32)
+                    .clamp(0, grid.screen_lines() as i32 - 1);
                 Some(pos2(
                     rect.left() + point.column.0 as f32 * cell_size.x,
                     rect.top() + row as f32 * cell_size.y,
@@ -293,15 +303,21 @@ impl TerminalView {
 
     /// Handle IME composition events of the focused terminal.
     ///
-    /// The preedit string is kept for drawing at the cursor; commits are
-    /// written to the child like typed text. The events only arrive once
-    /// the IME output anchors the candidate window, which
-    /// [`Self::draw_ime`] takes care of.
-    fn ime(&mut self, events: &[Event]) -> Vec<u8> {
+    /// Returns the input bytes for commits, and whether a composition just
+    /// started, i.e. the preedit went from empty to non-empty. Commits are
+    /// written to the child like typed text; the preedit string is kept for
+    /// drawing at the cursor. The events only arrive once the IME output
+    /// anchors the candidate window, which [`Self::draw_ime`] takes care
+    /// of.
+    fn ime(&mut self, events: &[Event]) -> (Vec<u8>, bool) {
         let mut input = Vec::new();
+        let mut started = false;
         for event in events {
             match event {
-                Event::Ime(ImeEvent::Preedit { text, .. }) => self.preedit = text.clone(),
+                Event::Ime(ImeEvent::Preedit { text, .. }) => {
+                    started |= self.preedit.is_empty() && !text.is_empty();
+                    self.preedit = text.clone();
+                }
                 Event::Ime(ImeEvent::Commit(text)) => {
                     self.preedit.clear();
                     input.extend_from_slice(text.as_bytes());
@@ -309,7 +325,7 @@ impl TerminalView {
                 _ => (),
             }
         }
-        input
+        (input, started)
     }
 
     /// Anchor the IME candidate window at the terminal cursor and draw the
@@ -688,5 +704,58 @@ impl TerminalView {
 impl Default for TerminalView {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use egui::{Event, ImeEvent};
+
+    use super::TerminalView;
+
+    /// A preedit event with the composition `text`.
+    fn preedit(text: &str) -> Event {
+        Event::Ime(ImeEvent::Preedit {
+            text: text.to_owned(),
+            active_range_chars: None,
+        })
+    }
+
+    /// Starting a composition is reported once, so the view can scroll to
+    /// the bottom like on any other input.
+    #[test]
+    fn ime_composition_start_is_detected() {
+        let mut view = TerminalView::new();
+
+        // The first non-empty preedit starts a composition.
+        let (input, composing) = view.ime(&[preedit("你")]);
+        assert!(input.is_empty());
+        assert!(composing);
+
+        // Extending the running composition is not a new start.
+        let (input, composing) = view.ime(&[preedit("你好")]);
+        assert!(input.is_empty());
+        assert!(!composing);
+
+        // Committing writes the text and ends the composition.
+        let (input, composing) = view.ime(&[Event::Ime(ImeEvent::Commit("你好".to_owned()))]);
+        assert_eq!(input, "你好".as_bytes());
+        assert!(!composing);
+        assert!(view.preedit.is_empty());
+
+        // A fresh composition after the commit starts again.
+        let (_, composing) = view.ime(&[preedit("好")]);
+        assert!(composing);
+    }
+
+    /// Dismissing the IME (empty preedit) never counts as a start.
+    #[test]
+    fn ime_dismissal_is_no_composition_start() {
+        let mut view = TerminalView::new();
+
+        let (input, composing) = view.ime(&[preedit("")]);
+        assert!(input.is_empty());
+        assert!(!composing);
+        assert!(view.preedit.is_empty());
     }
 }

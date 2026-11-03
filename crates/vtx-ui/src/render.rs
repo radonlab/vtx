@@ -162,6 +162,7 @@ fn cell_colors(cell: &Cell, theme: &TerminalTheme) -> (Color32, Color32) {
 /// The whole rect is filled with the default background first, so cells
 /// without an explicit background need no rectangle of their own. Cells of
 /// the `hovered_link` get an underline, marking the link as clickable.
+#[expect(clippy::too_many_arguments)]
 pub fn render_terminal<T: EventListener>(
     painter: &Painter,
     rect: Rect,
