@@ -44,6 +44,11 @@ impl TerminalTheme {
         self.color(Color::Named(NamedColor::Background))
     }
 
+    /// The default text color.
+    pub fn foreground(&self) -> Color32 {
+        self.color(Color::Named(NamedColor::Foreground))
+    }
+
     /// The block cursor color.
     pub fn cursor_color(&self) -> Color32 {
         Color32::from_rgb(self.cursor.r, self.cursor.g, self.cursor.b)

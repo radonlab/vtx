@@ -3,19 +3,28 @@
 //! The screen is drawn in layers: the default background fills the whole
 //! rect, consecutive cells with the same background merge into one
 //! rectangle, single-width text is grouped into per-line runs of equal
-//! color, wide glyphs are centered over their two-cell span, and the block
-//! cursor is painted last. Selection highlight, link underlines, and
-//! underline styles land together with their terminal features.
+//! color, wide glyphs are centered over their two-cell span, and the cursor
+//! is painted last, as a block, beam, or underline per DECSCUSR. Selected
+//! cells invert their colors; link underlines and underline styles land
+//! together with their terminal features.
+
+/// Cursor line thickness as a fraction of the cell, like upstream's
+/// default.
+const CURSOR_THICKNESS: f32 = 0.15;
+
+/// Thickness of the hovered hyperlink's underline, in logical pixels.
+const LINK_UNDERLINE_THICKNESS: f32 = 2.0;
 
 use std::mem;
 
 use egui::{Align2, Color32, CornerRadius, FontId, Painter, Rect, Vec2, pos2, vec2};
-use vtx_core::cell::{Cell, Flags};
+use vtx_core::cell::{Cell, Flags, Hyperlink};
 use vtx_core::color::DIM_FACTOR;
 use vtx_core::event::EventListener;
 use vtx_core::grid::Dimensions;
 use vtx_core::mode::TermMode;
-use vtx_core::term::Term;
+use vtx_core::selection::SelectionRange;
+use vtx_core::term::{CursorShape, Term};
 
 use crate::font::TerminalFont;
 use crate::theme::TerminalTheme;
@@ -69,8 +78,15 @@ pub struct LineCommands {
 
 impl LineCommands {
     /// Add the cell at `column` to the line.
-    pub fn push(&mut self, column: usize, cell: &Cell, theme: &TerminalTheme) {
-        let (fg, bg) = cell_colors(cell, theme);
+    ///
+    /// Selected cells invert their colors, following upstream's default
+    /// when no dedicated selection color is configured.
+    pub fn push(&mut self, column: usize, cell: &Cell, theme: &TerminalTheme, selected: bool) {
+        let (mut fg, mut bg) = cell_colors(cell, theme);
+
+        if selected {
+            mem::swap(&mut fg, &mut bg);
+        }
 
         // Merge into the previous run when it ends right before this cell.
         if bg != theme.background() {
@@ -144,13 +160,17 @@ fn cell_colors(cell: &Cell, theme: &TerminalTheme) -> (Color32, Color32) {
 /// Paint the visible area of a terminal into `rect`.
 ///
 /// The whole rect is filled with the default background first, so cells
-/// without an explicit background need no rectangle of their own.
+/// without an explicit background need no rectangle of their own. Cells of
+/// the `hovered_link` get an underline, marking the link as clickable.
 pub fn render_terminal<T: EventListener>(
     painter: &Painter,
     rect: Rect,
     term: &Term<T>,
     font: &TerminalFont,
     theme: &TerminalTheme,
+    selection: Option<SelectionRange>,
+    cursor_visible: bool,
+    hovered_link: Option<&Hyperlink>,
 ) {
     painter.rect_filled(rect, CornerRadius::ZERO, theme.background());
 
@@ -166,10 +186,22 @@ pub fn render_terminal<T: EventListener>(
 
     // Collect the drawing commands of every visible line.
     let mut lines = vec![LineCommands::default(); screen_lines];
+    let mut link_cells = Vec::new();
     for indexed in grid.display_iter() {
         let row = (indexed.point.line.0 + display_offset as i32) as usize;
         if let Some(commands) = lines.get_mut(row) {
-            commands.push(indexed.point.column.0, indexed.cell, theme);
+            let selected = selection.is_some_and(|s| s.contains_cell(indexed.point, indexed.cell));
+            commands.push(indexed.point.column.0, indexed.cell, theme, selected);
+        }
+
+        // The hovered link is underlined across all of its cells.
+        if let Some(hovered) = hovered_link
+            && indexed
+                .cell
+                .hyperlink()
+                .is_some_and(|link| link.id() == hovered.id())
+        {
+            link_cells.push((row, indexed.point.column.0, theme.color(indexed.cell.fg)));
         }
     }
 
@@ -209,14 +241,41 @@ pub fn render_terminal<T: EventListener>(
         }
     }
 
-    render_cursor(painter, rect, term, cell_size, theme, &font_id);
+    // Underline the hovered hyperlink's cells.
+    let thickness = LINK_UNDERLINE_THICKNESS;
+    for (row, column, color) in link_cells {
+        let cell_rect = Rect::from_min_size(
+            pos2(
+                rect.left() + column as f32 * cell_size.x,
+                rect.top() + row as f32 * cell_size.y,
+            ),
+            cell_size,
+        );
+        let underline = Rect::from_min_size(
+            pos2(cell_rect.left(), cell_rect.bottom() - thickness),
+            vec2(cell_rect.width(), thickness),
+        );
+        painter.rect_filled(underline, CornerRadius::ZERO, color);
+    }
+
+    render_cursor(
+        painter,
+        rect,
+        term,
+        cell_size,
+        theme,
+        &font_id,
+        cursor_visible,
+    );
 }
 
-/// Paint the block cursor overlay.
+/// Paint the cursor overlay.
 ///
-/// The cursor block covers its cell and the glyph below is redrawn in the
-/// screen background color, which keeps it readable. Blinking lands with
-/// the scheduler milestone.
+/// The cursor takes the shape the child requested via DECSCUSR, or a block
+/// by default. A block covers its cell and the glyph below is redrawn in
+/// the screen background color, which keeps it readable; the beam and
+/// underline shapes only overlay part of the cell and leave the glyph
+/// untouched. `visible` is false during a blink's dark phase.
 fn render_cursor<T: EventListener>(
     painter: &Painter,
     rect: Rect,
@@ -224,10 +283,15 @@ fn render_cursor<T: EventListener>(
     cell_size: Vec2,
     theme: &TerminalTheme,
     font_id: &FontId,
+    visible: bool,
 ) {
-    if !term.mode().contains(TermMode::SHOW_CURSOR) {
+    if !visible || !term.mode().contains(TermMode::SHOW_CURSOR) {
         return;
     }
+
+    let shape = term
+        .cursor_style()
+        .map_or(CursorShape::Block, |style| style.shape);
 
     let grid = term.grid();
     let point = term.cursor_point();
@@ -248,21 +312,39 @@ fn render_cursor<T: EventListener>(
         ),
         vec2(cell_size.x * span, cell_size.y),
     );
-    painter.rect_filled(cursor_rect, CornerRadius::ZERO, theme.cursor_color());
 
-    // Redraw the glyph below the cursor in a contrasting color.
-    let redraw = !cell
-        .flags
-        .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
-        && cell.c != ' '
-        && !cell.flags.contains(Flags::HIDDEN);
-    if redraw {
-        let (pos, anchor) = if wide {
-            (cursor_rect.center(), Align2::CENTER_CENTER)
-        } else {
-            (cursor_rect.left_top(), Align2::LEFT_TOP)
-        };
-        painter.text(pos, anchor, cell.c, font_id.clone(), theme.background());
+    match shape {
+        CursorShape::Block => {
+            painter.rect_filled(cursor_rect, CornerRadius::ZERO, theme.cursor_color());
+
+            // Redraw the glyph below the cursor in a contrasting color.
+            let redraw = !cell
+                .flags
+                .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
+                && cell.c != ' '
+                && !cell.flags.contains(Flags::HIDDEN);
+            if redraw {
+                let (pos, anchor) = if wide {
+                    (cursor_rect.center(), Align2::CENTER_CENTER)
+                } else {
+                    (cursor_rect.left_top(), Align2::LEFT_TOP)
+                };
+                painter.text(pos, anchor, cell.c, font_id.clone(), theme.background());
+            }
+        }
+        CursorShape::Beam => {
+            let width = (cell_size.x * CURSOR_THICKNESS).max(1.0);
+            let bar = Rect::from_min_size(cursor_rect.left_top(), vec2(width, cell_size.y));
+            painter.rect_filled(bar, CornerRadius::ZERO, theme.cursor_color());
+        }
+        CursorShape::Underline => {
+            let height = (cell_size.y * CURSOR_THICKNESS).max(1.0);
+            let strip = Rect::from_min_size(
+                pos2(cursor_rect.left(), cursor_rect.bottom() - height),
+                vec2(cursor_rect.width(), height),
+            );
+            painter.rect_filled(strip, CornerRadius::ZERO, theme.cursor_color());
+        }
     }
 }
 
@@ -272,6 +354,7 @@ mod tests {
     use vte::ansi::Processor;
     use vtx_core::color::{Color, NamedColor};
     use vtx_core::event::VoidListener;
+    use vtx_core::index::{Column, Line, Point};
     use vtx_core::term::Term;
 
     use super::*;
@@ -305,11 +388,11 @@ mod tests {
         let red = Color::Named(NamedColor::Red);
         let mut commands = LineCommands::default();
 
-        commands.push(0, &cell('a', fg, blue), &theme);
-        commands.push(1, &cell('b', fg, blue), &theme);
-        commands.push(2, &cell('c', fg, red), &theme);
-        commands.push(3, &cell('d', fg, bg), &theme);
-        commands.push(4, &cell('e', fg, blue), &theme);
+        commands.push(0, &cell('a', fg, blue), &theme, false);
+        commands.push(1, &cell('b', fg, blue), &theme, false);
+        commands.push(2, &cell('c', fg, red), &theme, false);
+        commands.push(3, &cell('d', fg, bg), &theme, false);
+        commands.push(4, &cell('e', fg, blue), &theme, false);
 
         assert_eq!(
             commands.backgrounds,
@@ -339,8 +422,8 @@ mod tests {
         let (fg, bg) = defaults();
         let mut commands = LineCommands::default();
 
-        commands.push(0, &cell('a', fg, bg), &theme);
-        commands.push(1, &cell('b', fg, bg), &theme);
+        commands.push(0, &cell('a', fg, bg), &theme, false);
+        commands.push(1, &cell('b', fg, bg), &theme, false);
 
         assert!(commands.backgrounds.is_empty());
     }
@@ -352,11 +435,11 @@ mod tests {
         let red = Color::Named(NamedColor::Red);
         let mut commands = LineCommands::default();
 
-        commands.push(0, &cell('h', fg, bg), &theme);
-        commands.push(1, &cell('i', fg, bg), &theme);
-        commands.push(2, &cell(' ', fg, bg), &theme);
-        commands.push(3, &cell('!', fg, bg), &theme);
-        commands.push(4, &cell('?', red, bg), &theme);
+        commands.push(0, &cell('h', fg, bg), &theme, false);
+        commands.push(1, &cell('i', fg, bg), &theme, false);
+        commands.push(2, &cell(' ', fg, bg), &theme, false);
+        commands.push(3, &cell('!', fg, bg), &theme, false);
+        commands.push(4, &cell('?', red, bg), &theme, false);
 
         assert_eq!(
             commands.texts,
@@ -386,9 +469,9 @@ mod tests {
         let (fg, bg) = defaults();
         let mut commands = LineCommands::default();
 
-        commands.push(0, &cell('a', fg, bg), &theme);
+        commands.push(0, &cell('a', fg, bg), &theme, false);
         // Column 1 is skipped, e.g. because a wide glyph was drawn there.
-        commands.push(2, &cell('b', fg, bg), &theme);
+        commands.push(2, &cell('b', fg, bg), &theme, false);
 
         assert_eq!(commands.texts.len(), 2);
     }
@@ -403,9 +486,9 @@ mod tests {
         spacer.flags.insert(Flags::WIDE_CHAR_SPACER);
 
         let mut commands = LineCommands::default();
-        commands.push(0, &wide, &theme);
-        commands.push(1, &spacer, &theme);
-        commands.push(2, &cell('a', fg, bg), &theme);
+        commands.push(0, &wide, &theme, false);
+        commands.push(1, &spacer, &theme, false);
+        commands.push(2, &cell('a', fg, bg), &theme, false);
 
         assert_eq!(
             commands.wides,
@@ -433,7 +516,7 @@ mod tests {
         inverse.flags.insert(Flags::INVERSE);
 
         let mut commands = LineCommands::default();
-        commands.push(0, &inverse, &theme);
+        commands.push(0, &inverse, &theme, false);
 
         assert_eq!(
             commands.backgrounds,
@@ -461,7 +544,7 @@ mod tests {
         dim.flags.insert(Flags::DIM);
 
         let mut commands = LineCommands::default();
-        commands.push(0, &dim, &theme);
+        commands.push(0, &dim, &theme, false);
 
         assert_eq!(
             commands.texts[0].color,
@@ -478,9 +561,36 @@ mod tests {
         hidden.flags.insert(Flags::HIDDEN);
 
         let mut commands = LineCommands::default();
-        commands.push(0, &hidden, &theme);
+        commands.push(0, &hidden, &theme, false);
 
         assert!(commands.texts.is_empty());
+    }
+
+    #[test]
+    fn selection_inverts_cell_colors() {
+        let theme = TerminalTheme::default();
+        let (fg, bg) = defaults();
+
+        let mut unselected = LineCommands::default();
+        unselected.push(0, &cell('a', fg, bg), &theme, false);
+
+        let mut selected = LineCommands::default();
+        selected.push(0, &cell('a', fg, bg), &theme, true);
+
+        // The selected cell swaps foreground and background: the cell gains
+        // a background run in the foreground color and its text is drawn in
+        // the background color.
+        assert_eq!(unselected.backgrounds, Vec::new());
+        assert_eq!(
+            selected.backgrounds,
+            vec![BgRun {
+                column: 0,
+                span: 1,
+                color: theme.color(fg)
+            }]
+        );
+        assert_eq!(unselected.texts[0].color, theme.color(fg));
+        assert_eq!(selected.texts[0].color, theme.background());
     }
 
     #[test]
@@ -500,6 +610,9 @@ mod tests {
             &term,
             &font,
             &theme,
+            None,
+            true,
+            None,
         );
 
         let output = ctx.end_pass();
@@ -525,5 +638,133 @@ mod tests {
         assert!(backgrounds >= 1, "the default background was not painted");
         assert_eq!(cursors, 1, "the block cursor was not painted exactly once");
         assert!(texts >= 1, "no text was painted");
+    }
+
+    #[test]
+    fn beam_and_underline_cursors_paint_thin_overlays() {
+        for sequence in ["\x1b[5 q", "\x1b[3 q"] {
+            let ctx = egui::Context::default();
+            ctx.begin_pass(RawInput::default());
+
+            let mut term = Term::new(10, 3, 0, VoidListener);
+            let mut processor: Processor = Processor::new();
+            processor.advance(&mut term, b"text");
+            processor.advance(&mut term, sequence.as_bytes());
+
+            let font = TerminalFont::default();
+            let theme = TerminalTheme::default();
+            render_terminal(
+                &ctx.debug_painter(),
+                Rect::from_min_size(Pos2::ZERO, Vec2::new(200.0, 60.0)),
+                &term,
+                &font,
+                &theme,
+                None,
+                true,
+                None,
+            );
+
+            let output = ctx.end_pass();
+
+            // The thin cursor shapes leave the glyph untouched, so only the
+            // thin overlay itself is painted in the cursor color.
+            let thin: Vec<_> = output
+                .shapes
+                .iter()
+                .filter_map(|clipped| match &clipped.shape {
+                    Shape::Rect(rect) => Some((rect.fill, rect.rect)),
+                    _ => None,
+                })
+                .filter(|(fill, _)| *fill == theme.cursor_color())
+                .collect();
+            output.drop_without_applying_deltas();
+
+            assert_eq!(thin.len(), 1, "one cursor overlay was expected");
+            let (_, rect) = thin[0];
+            let cell = font.cell_size(&ctx);
+            let near = |a: f32, b: f32| (a - b).abs() < 0.01;
+            if sequence == "\x1b[5 q" {
+                // Beam: a vertical bar over the full cell height.
+                assert!(near(rect.width(), (cell.x * CURSOR_THICKNESS).max(1.0)));
+                assert!(near(rect.height(), cell.y));
+            } else {
+                // Underline: a strip along the cell bottom.
+                assert!(near(rect.width(), cell.x));
+                assert!(near(rect.height(), (cell.y * CURSOR_THICKNESS).max(1.0)));
+            }
+        }
+    }
+
+    #[test]
+    fn invisible_cursor_paints_nothing() {
+        let ctx = egui::Context::default();
+        ctx.begin_pass(RawInput::default());
+
+        let term = Term::new(10, 3, 0, VoidListener);
+        let font = TerminalFont::default();
+        let theme = TerminalTheme::default();
+        render_terminal(
+            &ctx.debug_painter(),
+            Rect::from_min_size(Pos2::ZERO, Vec2::new(200.0, 60.0)),
+            &term,
+            &font,
+            &theme,
+            None,
+            false,
+            None,
+        );
+
+        let output = ctx.end_pass();
+
+        let cursors = output
+            .shapes
+            .iter()
+            .filter(|clipped| matches!(&clipped.shape, Shape::Rect(rect) if rect.fill == theme.cursor_color()))
+            .count();
+        output.drop_without_applying_deltas();
+        assert_eq!(cursors, 0, "the blink's dark phase paints no cursor");
+    }
+
+    #[test]
+    fn hovered_hyperlink_is_underlined() {
+        let ctx = egui::Context::default();
+        ctx.begin_pass(RawInput::default());
+
+        let mut term = Term::new(20, 3, 0, VoidListener);
+        let mut processor: Processor = Processor::new();
+        processor.advance(&mut term, b"\x1b]8;;https://example.com\x1b\\link");
+
+        let hovered = term.grid()[Point::new(Line(0), Column(0))]
+            .hyperlink()
+            .expect("written cells carry the link");
+
+        let font = TerminalFont::default();
+        let theme = TerminalTheme::default();
+        render_terminal(
+            &ctx.debug_painter(),
+            Rect::from_min_size(Pos2::ZERO, Vec2::new(200.0, 60.0)),
+            &term,
+            &font,
+            &theme,
+            None,
+            false,
+            Some(&hovered),
+        );
+
+        let output = ctx.end_pass();
+
+        // One thin underline per cell of the hovered link, in the cells'
+        // foreground color.
+        let underlines = output
+            .shapes
+            .iter()
+            .filter(|clipped| {
+                matches!(&clipped.shape, Shape::Rect(rect) if rect.fill == theme.foreground()
+                    && (rect.rect.height() - LINK_UNDERLINE_THICKNESS).abs() < 0.01)
+            })
+            .count();
+        output.drop_without_applying_deltas();
+
+        assert_eq!(underlines, 4, "every link cell gets an underline");
     }
 }

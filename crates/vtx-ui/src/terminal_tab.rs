@@ -27,6 +27,8 @@ struct Pane {
     session: TerminalSession,
     /// Terminal screen rendered inside the tab.
     view: TerminalView,
+    /// The tab title set by the child (OSC 0/2), if any.
+    title: Option<String>,
 }
 
 impl Pane {
@@ -43,6 +45,7 @@ impl Pane {
             id,
             session,
             view: TerminalView::new(),
+            title: None,
         })
     }
 
@@ -67,6 +70,15 @@ impl Pane {
         }
 
         let response = self.view.show(ui, &mut self.session);
+
+        // Pick up title changes from the child (OSC 0/2); the session's
+        // event proxy already repaints on them.
+        self.title = self
+            .session
+            .terminal()
+            .lock_unfair()
+            .title()
+            .map(str::to_owned);
 
         // Reap the child watcher once the child is gone; joining is
         // idempotent, and the watcher finishes right after the exit.
@@ -93,7 +105,11 @@ impl TabViewer for TerminalTabViewer {
     }
 
     fn title(&mut self, tab: &mut Self::Tab) -> WidgetText {
-        format!("Shell {}", tab.id).into()
+        // The child's title (OSC 0/2) when it set one, else a fallback.
+        match &tab.title {
+            Some(title) => title.clone().into(),
+            None => format!("Shell {}", tab.id).into(),
+        }
     }
 
     fn ui(&mut self, ui: &mut Ui, tab: &mut Self::Tab) {

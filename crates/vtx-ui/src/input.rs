@@ -22,6 +22,7 @@ pub fn encode(events: &[Event], mode: TermMode) -> Vec<u8> {
     for event in events {
         match event {
             Event::Text(text) => input.extend_from_slice(text.as_bytes()),
+            Event::Paste(text) => input.extend_from_slice(&paste(text, mode)),
             Event::Key {
                 key,
                 pressed: true,
@@ -34,9 +35,41 @@ pub fn encode(events: &[Event], mode: TermMode) -> Vec<u8> {
     input
 }
 
+/// The input bytes for pasted `text`.
+///
+/// The child expects carriage returns for newlines, and bracketed paste
+/// (mode 2004) wraps the text in markers so shells and editors can tell
+/// typed and pasted input apart. Escape and ETX are filtered from
+/// bracketed text so pasted content cannot forge the bracket end marker.
+pub fn paste(text: &str, mode: TermMode) -> Vec<u8> {
+    let text = text.replace("\r\n", "\r").replace('\n', "\r");
+
+    if mode.contains(TermMode::BRACKETED_PASTE) {
+        let text = text.replace(['\x1b', '\x03'], "");
+
+        let mut input = b"\x1b[200~".to_vec();
+        input.extend_from_slice(text.as_bytes());
+        input.extend_from_slice(b"\x1b[201~");
+        input
+    } else {
+        text.into_bytes()
+    }
+}
+
+/// The input bytes reporting a focus change to the child (mode 1004).
+pub fn focus(focused: bool) -> &'static [u8] {
+    if focused { b"\x1b[I" } else { b"\x1b[O" }
+}
+
 /// Append the input bytes for one key press.
 fn encode_key(input: &mut Vec<u8>, key: Key, modifiers: Modifiers, mode: TermMode) {
     if modifiers.ctrl {
+        // Ctrl+Shift+C/V are the terminal's clipboard shortcuts; the view
+        // handles them against the system clipboard.
+        if modifiers.shift && matches!(key, Key::C | Key::V) {
+            return;
+        }
+
         // Control codes: Ctrl+C becomes ETX (0x03), like in any terminal.
         // Other Ctrl combinations, like Ctrl+Arrow, wait for a key binding
         // layer that can map them to escape sequences.
@@ -45,6 +78,15 @@ fn encode_key(input: &mut Vec<u8>, key: Key, modifiers: Modifiers, mode: TermMod
         } else if key == Key::Space {
             input.push(0x00);
         }
+        return;
+    }
+
+    // Shift+PageUp/PageDown/Home/End are the terminal's scroll shortcuts;
+    // the view scrolls the scrollback instead of writing to the child.
+    if modifiers.shift
+        && !modifiers.alt
+        && matches!(key, Key::PageUp | Key::PageDown | Key::Home | Key::End)
+    {
         return;
     }
 
@@ -101,7 +143,7 @@ fn arrow(mode: TermMode, key: u8) -> &'static [u8] {
 mod tests {
     use egui::{Event, Key, Modifiers};
 
-    use super::encode;
+    use super::{encode, paste};
     use vtx_core::mode::TermMode;
 
     /// A key press event.
@@ -178,6 +220,61 @@ mod tests {
     fn ctrl_space_becomes_nul() {
         let events = [key(Key::Space, Modifiers::CTRL)];
         assert_eq!(encode(&events, TermMode::empty()), b"\x00");
+    }
+
+    #[test]
+    fn clipboard_shortcuts_stay_in_the_frontend() {
+        // Ctrl+Shift+C/V must not reach the child as control codes; the
+        // view handles them against the system clipboard.
+        let events = [
+            key(Key::C, Modifiers::CTRL | Modifiers::SHIFT),
+            key(Key::V, Modifiers::CTRL | Modifiers::SHIFT),
+        ];
+        assert_eq!(encode(&events, TermMode::empty()), b"");
+    }
+
+    #[test]
+    fn scroll_shortcuts_stay_in_the_frontend() {
+        // Shift+PageUp/PageDown/Home/End scroll the scrollback; the child
+        // never sees them.
+        let events = [
+            key(Key::PageUp, Modifiers::SHIFT),
+            key(Key::PageDown, Modifiers::SHIFT),
+            key(Key::Home, Modifiers::SHIFT),
+            key(Key::End, Modifiers::SHIFT),
+        ];
+        assert_eq!(encode(&events, TermMode::empty()), b"");
+    }
+
+    #[test]
+    fn plain_navigation_keys_reach_the_child() {
+        let events = [
+            key(Key::PageUp, Modifiers::NONE),
+            key(Key::Home, Modifiers::NONE),
+        ];
+        assert_eq!(encode(&events, TermMode::empty()), b"\x1b[5~\x1b[H");
+    }
+
+    #[test]
+    fn paste_normalizes_newlines() {
+        assert_eq!(paste("a\r\nb\nc", TermMode::empty()), b"a\rb\rc");
+    }
+
+    #[test]
+    fn paste_wraps_in_brackets_when_mode_set() {
+        assert_eq!(
+            paste("ls", TermMode::BRACKETED_PASTE),
+            b"\x1b[200~ls\x1b[201~"
+        );
+    }
+
+    #[test]
+    fn paste_events_encode_through_brackets() {
+        let events = [Event::Paste("a\nb".to_owned())];
+        assert_eq!(
+            encode(&events, TermMode::BRACKETED_PASTE),
+            b"\x1b[200~a\rb\x1b[201~"
+        );
     }
 
     #[test]

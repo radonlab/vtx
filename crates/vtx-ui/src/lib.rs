@@ -5,6 +5,7 @@
 
 mod font;
 mod input;
+pub mod mouse;
 mod render;
 mod terminal_tab;
 mod terminal_view;
