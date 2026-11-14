@@ -1,0 +1,10 @@
+[package]
+name = "app"
+publish = false
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+vtx-core = { path = "../crates/vtx-core" }
+vtx-term = { path = "../crates/vtx-term" }
