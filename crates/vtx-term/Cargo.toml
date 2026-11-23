@@ -1,7 +1,9 @@
 [package]
 name = "vtx-term"
+publish = false
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [dependencies]
+vtx-core = { path = "../vtx-core" }
