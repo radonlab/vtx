@@ -7,5 +7,6 @@ license.workspace = true
 
 [dependencies]
 eframe.workspace = true
+egui_stack.workspace = true
 vtx-core = { path = "../crates/vtx-core" }
 vtx-term = { path = "../crates/vtx-term" }

@@ -11,6 +11,7 @@ license = "Apache-2.0"
 alacritty_terminal = "0.26.0"
 eframe = "0.37.0"
 egui = "0.37.0"
+egui_stack = "0.31.1"
 
 [profile.release]
 lto = true
