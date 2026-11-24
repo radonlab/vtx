@@ -6,5 +6,6 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+eframe.workspace = true
 vtx-core = { path = "../crates/vtx-core" }
 vtx-term = { path = "../crates/vtx-term" }
