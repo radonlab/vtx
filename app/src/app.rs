@@ -2,17 +2,20 @@
 
 use eframe::egui;
 use egui_stack::{DockArea, DockState, OverlayType, Style, TabViewer};
+use vtx_core::AppSettings;
 
-/// One dockable panel. For now a plain label; will become a terminal session.
+/// One dockable panel: a terminal session or the settings page.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum Tab {
     Terminal(String),
+    Settings(AppSettings),
 }
 
 impl Tab {
     fn title_text(&self) -> &str {
         match self {
             Tab::Terminal(name) => name,
+            Tab::Settings(_) => "Settings",
         }
     }
 }
@@ -36,6 +39,28 @@ impl TabViewer for VtxTabViewer {
             Tab::Terminal(name) => {
                 ui.label(format!("terminal placeholder: {name}"));
             }
+            Tab::Settings(settings) => {
+                egui::Grid::new("settings_grid")
+                    .num_columns(2)
+                    .spacing([16.0, 8.0])
+                    .show(ui, |ui| {
+                        ui.strong("Font size");
+                        ui.add(egui::Slider::new(&mut settings.font_size, 6..=32));
+                        ui.end_row();
+
+                        ui.strong("Scrollback");
+                        ui.add(
+                            egui::DragValue::new(&mut settings.scrollback_lines)
+                                .range(0..=1_000_000)
+                                .suffix(" lines"),
+                        );
+                        ui.end_row();
+
+                        ui.strong("Cursor blink");
+                        ui.add(egui::Checkbox::new(&mut settings.cursor_blink, ""));
+                        ui.end_row();
+                    });
+            }
         }
     }
 }
@@ -49,6 +74,7 @@ impl VtxApp {
         let tabs = vec![
             Tab::Terminal("term 1".into()),
             Tab::Terminal("term 2".into()),
+            Tab::Settings(AppSettings::default()),
         ];
         Self {
             dock_state: DockState::new(tabs),
@@ -63,6 +89,7 @@ impl eframe::App for VtxApp {
             style.overlay.overlay_type = OverlayType::Widgets;
             DockArea::new(&mut self.dock_state)
                 .style(style)
+                .show_leaf_close_all_buttons(false)
                 .show_inside(ui, &mut VtxTabViewer);
         });
     }
