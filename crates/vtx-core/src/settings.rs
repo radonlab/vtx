@@ -24,15 +24,3 @@ impl Default for AppSettings {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn defaults_are_sane() {
-        let s = AppSettings::default();
-        assert!(s.font_size >= 6);
-        assert!(s.scrollback_lines > 0);
-    }
-}

@@ -1,4 +1,4 @@
-//! Terminal color theme layer.
+//! Terminal color theme palette.
 //!
 //! `alacritty_terminal` stores only semantic color references (`vte::ansi::Color`)
 //! in cells plus a runtime override table filled by OSC sequences. The static
