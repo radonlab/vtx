@@ -31,6 +31,7 @@ use alacritty_terminal::vte::ansi::{Color, NamedColor, Rgb};
 pub struct Palette(pub [Rgb; COUNT]);
 
 /// Named slots a theme must provide; everything else is derived.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ThemeColors {
     pub foreground: Rgb,
     pub background: Rgb,
@@ -159,28 +160,100 @@ impl Default for Palette {
 
 /// The default theme's named colors.
 pub const DEFAULT_THEME: ThemeColors = ThemeColors {
-    foreground: Rgb { r: 0xc7, g: 0xc7, b: 0xc7 },
-    background: Rgb { r: 0x00, g: 0x00, b: 0x00 },
+    foreground: Rgb {
+        r: 0xc7,
+        g: 0xc7,
+        b: 0xc7,
+    },
+    background: Rgb {
+        r: 0x00,
+        g: 0x00,
+        b: 0x00,
+    },
     cursor: None,
     normal: [
-        Rgb { r: 0x00, g: 0x00, b: 0x00 }, // black
-        Rgb { r: 0xcd, g: 0x00, b: 0x00 }, // red
-        Rgb { r: 0x00, g: 0xcd, b: 0x00 }, // green
-        Rgb { r: 0xcd, g: 0xcd, b: 0x00 }, // yellow
-        Rgb { r: 0x00, g: 0x00, b: 0xee }, // blue
-        Rgb { r: 0xcd, g: 0x00, b: 0xcd }, // magenta
-        Rgb { r: 0x00, g: 0xcd, b: 0xcd }, // cyan
-        Rgb { r: 0xe5, g: 0xe5, b: 0xe5 }, // white
+        Rgb {
+            r: 0x00,
+            g: 0x00,
+            b: 0x00,
+        }, // black
+        Rgb {
+            r: 0xcd,
+            g: 0x00,
+            b: 0x00,
+        }, // red
+        Rgb {
+            r: 0x00,
+            g: 0xcd,
+            b: 0x00,
+        }, // green
+        Rgb {
+            r: 0xcd,
+            g: 0xcd,
+            b: 0x00,
+        }, // yellow
+        Rgb {
+            r: 0x00,
+            g: 0x00,
+            b: 0xee,
+        }, // blue
+        Rgb {
+            r: 0xcd,
+            g: 0x00,
+            b: 0xcd,
+        }, // magenta
+        Rgb {
+            r: 0x00,
+            g: 0xcd,
+            b: 0xcd,
+        }, // cyan
+        Rgb {
+            r: 0xe5,
+            g: 0xe5,
+            b: 0xe5,
+        }, // white
     ],
     bright: [
-        Rgb { r: 0x7f, g: 0x7f, b: 0x7f }, // bright black
-        Rgb { r: 0xff, g: 0x00, b: 0x00 }, // bright red
-        Rgb { r: 0x00, g: 0xff, b: 0x00 }, // bright green
-        Rgb { r: 0xff, g: 0xff, b: 0x00 }, // bright yellow
-        Rgb { r: 0x5c, g: 0x5c, b: 0xff }, // bright blue
-        Rgb { r: 0xff, g: 0x00, b: 0xff }, // bright magenta
-        Rgb { r: 0x00, g: 0xff, b: 0xff }, // bright cyan
-        Rgb { r: 0xff, g: 0xff, b: 0xff }, // bright white
+        Rgb {
+            r: 0x7f,
+            g: 0x7f,
+            b: 0x7f,
+        }, // bright black
+        Rgb {
+            r: 0xff,
+            g: 0x00,
+            b: 0x00,
+        }, // bright red
+        Rgb {
+            r: 0x00,
+            g: 0xff,
+            b: 0x00,
+        }, // bright green
+        Rgb {
+            r: 0xff,
+            g: 0xff,
+            b: 0x00,
+        }, // bright yellow
+        Rgb {
+            r: 0x5c,
+            g: 0x5c,
+            b: 0xff,
+        }, // bright blue
+        Rgb {
+            r: 0xff,
+            g: 0x00,
+            b: 0xff,
+        }, // bright magenta
+        Rgb {
+            r: 0x00,
+            g: 0xff,
+            b: 0xff,
+        }, // bright cyan
+        Rgb {
+            r: 0xff,
+            g: 0xff,
+            b: 0xff,
+        }, // bright white
     ],
 };
 
@@ -194,12 +267,28 @@ mod tests {
         // Cube and ramp spots are filled with distinct generated values.
         assert_eq!(palette.indexed(16), Rgb { r: 0, g: 0, b: 0 });
         assert_eq!(palette.indexed(232), Rgb { r: 8, g: 8, b: 8 });
-        assert_eq!(palette.indexed(255), Rgb { r: 238, g: 238, b: 238 });
+        assert_eq!(
+            palette.indexed(255),
+            Rgb {
+                r: 238,
+                g: 238,
+                b: 238
+            }
+        );
         // Named slots.
-        assert_eq!(palette.named(NamedColor::Foreground), DEFAULT_THEME.foreground);
-        assert_eq!(palette.named(NamedColor::Background), DEFAULT_THEME.background);
+        assert_eq!(
+            palette.named(NamedColor::Foreground),
+            DEFAULT_THEME.foreground
+        );
+        assert_eq!(
+            palette.named(NamedColor::Background),
+            DEFAULT_THEME.background
+        );
         assert_eq!(palette.named(NamedColor::Red), DEFAULT_THEME.normal[1]);
-        assert_eq!(palette.named(NamedColor::BrightWhite), DEFAULT_THEME.bright[7]);
+        assert_eq!(
+            palette.named(NamedColor::BrightWhite),
+            DEFAULT_THEME.bright[7]
+        );
         // Dim variants derived.
         assert_eq!(
             palette.named(NamedColor::DimRed),
@@ -245,7 +334,10 @@ mod tests {
             palette.indexed(200)
         );
         assert_eq!(
-            palette.resolve(Color::Named(NamedColor::Blue), &PaletteOverrides(&overrides)),
+            palette.resolve(
+                Color::Named(NamedColor::Blue),
+                &PaletteOverrides(&overrides)
+            ),
             DEFAULT_THEME.normal[4]
         );
     }

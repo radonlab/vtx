@@ -7,6 +7,6 @@ mod color;
 mod settings;
 mod theme_loader;
 
-pub use color::{Palette, PaletteOverrides, ThemeColors, DEFAULT_THEME};
+pub use color::{DEFAULT_THEME, Palette, PaletteOverrides, ThemeColors};
 pub use settings::AppSettings;
 pub use theme_loader::ThemeError;
